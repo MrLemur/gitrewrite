@@ -8,6 +8,8 @@
 
 **Intelligently rewrite your Git history with AI-powered commit messages.**
 
+![Screenshot of GitRewrite in action](./docs/images/main-screenshot.png)
+
 </div>
 
 ## 🚀 Overview
