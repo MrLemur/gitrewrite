@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/MrLemur/gitrewrite/internal/models"
 	"github.com/MrLemur/gitrewrite/internal/ui"
@@ -71,13 +70,11 @@ func GenerateNewCommitMessage(commit models.CommitOutput, model string, temperat
 		Required: []string{"commit_id", "messages"},
 	}
 
-	// Process files to handle secrets and large diffs
+	// Process files to handle large diffs
 	var processedFiles []models.File
 	for _, file := range commit.Files {
 		var processedFile models.File
-		if strings.Contains(file.Path, "secret.yaml") {
-			processedFile = models.File{Diff: "updated secret.yaml", Path: file.Path}
-		} else if len(file.Diff) > 2048 {
+		if len(file.Diff) > 2048 {
 			processedFile = models.File{Diff: file.Diff[:2048], Path: file.Path}
 		} else {
 			processedFile = file
