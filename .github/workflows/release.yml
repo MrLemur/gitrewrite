@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for release notes
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.23.x"
+
+      - name: Set up release version
+        id: release_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        run: |
+          mkdir -p ./dist
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -ldflags="-X main.Version=${{ steps.release_version.outputs.VERSION }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o ./dist/gitrewrite-linux-amd64 ./cmd/gitrewrite
+
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -ldflags="-X main.Version=${{ steps.release_version.outputs.VERSION }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o ./dist/gitrewrite-linux-arm64 ./cmd/gitrewrite
+
+          # macOS amd64
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-X main.Version=${{ steps.release_version.outputs.VERSION }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o ./dist/gitrewrite-darwin-amd64 ./cmd/gitrewrite
+
+          # macOS arm64
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-X main.Version=${{ steps.release_version.outputs.VERSION }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o ./dist/gitrewrite-darwin-arm64 ./cmd/gitrewrite
+
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -ldflags="-X main.Version=${{ steps.release_version.outputs.VERSION }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o ./dist/gitrewrite-windows-amd64.exe ./cmd/gitrewrite
+
+          # Windows arm64
+          GOOS=windows GOARCH=arm64 go build -ldflags="-X main.Version=${{ steps.release_version.outputs.VERSION }} -X main.BuildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" -o ./dist/gitrewrite-windows-arm64.exe ./cmd/gitrewrite
+
+      - name: Create release notes
+        id: release_notes
+        run: |
+          # Get the previous tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 ${{ steps.release_version.outputs.VERSION }}^ 2>/dev/null || echo "")
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # If no previous tag, get all commits
+            echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
+            echo "## What's Changed" >> $GITHUB_OUTPUT
+            git log --pretty=format:"* %s (%h)" >> $GITHUB_OUTPUT
+            echo -e "\n\nFull Changelog: https://github.com/${{ github.repository }}/commits/${{ steps.release_version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            # Get commits between previous tag and current tag
+            echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
+            echo "## What's Changed" >> $GITHUB_OUTPUT
+            git log --pretty=format:"* %s (%h)" $PREVIOUS_TAG..${{ steps.release_version.outputs.VERSION }} >> $GITHUB_OUTPUT
+            echo -e "\n\nFull Changelog: https://github.com/${{ github.repository }}/compare/$PREVIOUS_TAG...${{ steps.release_version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.release_version.outputs.VERSION }}
+          body: ${{ steps.release_notes.outputs.RELEASE_NOTES }}
+          draft: false
+          prerelease: false
+          files: |
+            ./dist/gitrewrite-linux-amd64
+            ./dist/gitrewrite-linux-arm64
+            ./dist/gitrewrite-darwin-amd64
+            ./dist/gitrewrite-darwin-arm64
+            ./dist/gitrewrite-windows-amd64.exe
+            ./dist/gitrewrite-windows-arm64.exe
