@@ -12,7 +12,38 @@
 
 </div>
 
-## 🚀 Overview
+- [ALPHA SOFTWARE DISCLAIMER](#alpha-software-disclaimer)
+- [Overview](#overview)
+- [Features](#features)
+- [Usage](#usage)
+  - [Basic Usage](#basic-usage)
+  - [Options](#options)
+  - [Workflow Example](#workflow-example)
+- [Requirements](#requirements)
+- [Installation](#installation)
+  - [Using Go](#using-go)
+  - [From Source](#from-source)
+  - [Ollama Setup](#ollama-setup)
+  - [Recommended: Custom Ollama Modelfile](#recommended-custom-ollama-modelfile-with-increased-context)
+- [Motivation](#motivation)
+- [Cautions and FAQ](#cautions-and-faq)
+  - [Rewriting History Implications](#rewriting-history-implications)
+  - [Known Limitations (Alpha)](#known-limitations-alpha)
+  - [Common Questions](#common-questions)
+- [Development](#development)
+
+## ALPHA SOFTWARE DISCLAIMER
+
+**GitRewrite is currently in ALPHA stage of development.**
+
+- This software is experimental and may contain bugs or unexpected behavior
+- It is NOT recommended for use in production environments or with critical repositories
+- Always create a backup of your repository before using GitRewrite
+- Git history rewriting is inherently risky - proceed with caution
+- Features and command-line interface may change without notice
+- Use at your own risk
+
+## Overview
 
 GitRewrite transforms your repository's history by converting cryptic or minimal commit messages into meaningful, structured, conventional commits. Using AI, it analyzes each commit's code changes and creates descriptive messages that explain _what_ changed and _why_.
 
@@ -29,15 +60,7 @@ fix: resolve race condition in database connection pooling (database)
 chore: update Docker image to v21.3.1 (infrastructure)
 ```
 
-## 💡 Motivation
-
-Every developer has encountered (or created) repositories with unclear commit histories. GitRewrite was born from the frustration of maintaining a GitOps repository where many small changes accumulated over time with minimal or unhelpful commit messages.
-
-When you're debugging an issue or trying to understand why a change was made months ago, commit messages like "update config" or "fix bug" are nearly useless. GitRewrite transforms these into a clean, structured history that documents your codebase's evolution properly.
-
-By enforcing [Conventional Commits](https://www.conventionalcommits.org/) standards and detecting affected components, GitRewrite makes your Git history into a powerful documentation tool rather than a cryptic timeline.
-
-## ✨ Features
+## Features
 
 - **AI-Powered Message Generation**: Analyzes diffs to create meaningful, context-aware commit messages
 - **Conventional Commits Format**: Structures messages with type, description, and component
@@ -47,38 +70,7 @@ By enforcing [Conventional Commits](https://www.conventionalcommits.org/) standa
 - **Filters**: Target only commits with minimal or unclear messages
 - **Repository Safety**: Careful validation prevents accidental history corruption
 
-## 📋 Requirements
-
-- Go 1.23.4+
-- Git
-- [Ollama](https://ollama.ai/) with a large language model installed (default: qwen2.5:14b)
-
-## 🔧 Installation
-
-### Using Go
-
-```bash
-go install github.com/MrLemur/gitrewrite/cmd/gitrewrite@latest
-```
-
-### From Source
-
-```bash
-git clone https://github.com/MrLemur/gitrewrite.git
-cd gitrewrite
-make build
-```
-
-### Ollama Setup
-
-1. Install Ollama from [ollama.ai](https://ollama.ai)
-2. Pull the recommended model:
-   ```bash
-   ollama pull qwen2.5:14b
-   ```
-3. Ensure Ollama is running before using GitRewrite
-
-## 📖 Usage
+## Usage
 
 ### Basic Usage
 
@@ -109,40 +101,112 @@ gitrewrite -repo=/path/to/repository
 
 ### Workflow Example
 
-1. Run GitRewrite on your repository:
+1. **IMPORTANT**: Before running GitRewrite, create a backup of your repository:
    ```bash
-   gitrewrite -repo=/path/to/repo 
+   cp -r /path/to/repo /path/to/repo-backup
    ```
-   
-2. If not using dry-run mode, a confirmation dialog will appear:
-   ```
-   WARNING: This process is irreversible and will modify your git history.
-   
-   'No' is selected by default. Use Tab to select 'Yes' if you want to proceed.
-   ```
-   Review the number of commits to be processed and select 'Yes' to continue or 'No' (default) to cancel.
-   
-3. To first preview changes without applying them, use dry-run mode:
+
+2. Run GitRewrite in dry-run mode first to preview changes without applying them:
    ```bash
    gitrewrite -repo=/path/to/repo -dry-run
    ```
    This will generate a JSON file (default: repo-name-rewrite-changes.json) with the proposed commit message changes.
    
-4. Review the generated JSON file and make any desired edits.
+3. Review the generated JSON file and make any desired edits.
 
-5. Apply the changes from the JSON file:
+4. Apply the changes from the JSON file:
    ```bash 
    gitrewrite -repo=/path/to/repo -apply-changes=path/to/changes.json
    ```
-   The same confirmation dialog as in step 2 will appear before applying the changes.
+   A confirmation dialog will appear before applying the changes.
 
-## ⚠️ Cautions and FAQ
+5. For direct rewriting (not recommended for important repositories during alpha):
+   ```bash
+   gitrewrite -repo=/path/to/repo 
+   ```
+   A confirmation dialog will appear:
+   ```
+   WARNING: This process is irreversible and will modify your git history.
+   
+   'No' is selected by default. Use Tab to select 'Yes' if you want to proceed.
+   ```
+
+## Requirements
+
+- Go 1.23.4+
+- Git
+- [Ollama](https://ollama.ai/) with a large language model installed (default: qwen2.5:14b)
+
+## Installation
+
+### Using Go
+
+```bash
+go install github.com/MrLemur/gitrewrite/cmd/gitrewrite@latest
+```
+
+### From Source
+
+```bash
+git clone https://github.com/MrLemur/gitrewrite.git
+cd gitrewrite
+make build
+```
+
+### Ollama Setup
+
+1. Install Ollama from [ollama.ai](https://ollama.ai)
+2. Pull the recommended model:
+   ```bash
+   ollama pull qwen2.5:14b
+   ```
+3. Ensure Ollama is running before using GitRewrite
+
+### Recommended: Custom Ollama Modelfile with Increased Context
+
+For repositories with larger commits, it's highly recommended to create a custom Ollama model with increased context length. This improves the AI's ability to analyze code changes for better commit message generation.
+
+1. Create a file named `Modelfile` with the following content:
+   ```
+   FROM qwen2.5:14b
+   PARAMETER context_length 32768
+   ```
+
+2. Build the custom model:
+   ```bash
+   ollama create gitrewrite-qwen -f ./Modelfile
+   ```
+
+3. Use your custom model with GitRewrite:
+   ```bash
+   gitrewrite -repo=/path/to/repo -model=gitrewrite-qwen
+   ```
+
+Note: Increasing the context length requires more RAM and VRAM. Adjust the `context_length` value based on your system capabilities (16K, 32K, etc.).
+
+## Motivation
+
+Every developer has encountered (or created) repositories with unclear commit histories. GitRewrite was born from the frustration of maintaining a GitOps repository where many small changes accumulated over time with minimal or unhelpful commit messages.
+
+When you're debugging an issue or trying to understand why a change was made months ago, commit messages like "update config" or "fix bug" are nearly useless. GitRewrite transforms these into a clean, structured history that documents your codebase's evolution properly.
+
+By enforcing [Conventional Commits](https://www.conventionalcommits.org/) standards and detecting affected components, GitRewrite makes your Git history into a powerful documentation tool rather than a cryptic timeline.
+
+## Cautions and FAQ
 
 ### Rewriting History Implications
 
-- **Always backup your repository** before making bulk history changes
+- **ALWAYS CREATE A BACKUP before using this tool** - this cannot be emphasized enough
+- During alpha development, unexpected bugs may cause repository corruption
+- Consider testing on a clone or fork of your repository first
 - Rewriting history changes commit hashes, which can cause issues for collaborators
 - For shared repositories, communicate with your team before using this tool
+
+### Known Limitations (Alpha)
+
+- May not handle merge commits correctly in all situations
+- Large repositories with complex histories might cause unexpected behavior
+- Performance issues might occur with very large commits or diffs
 
 ### Common Questions
 
@@ -158,7 +222,10 @@ A: Use the dry-run mode to preview changes, edit the JSON file as needed, then a
 **Q: Can I process only specific commits?**  
 A: Currently, the tool processes all commits with messages shorter than the `-max-length` threshold.
 
-## 🛠️ Development
+**Q: What should I do if I encounter a bug?**  
+A: Please report it on our GitHub issues page with detailed steps to reproduce.
+
+## Development
 
 ```bash
 # Clone the repository
@@ -174,6 +241,6 @@ make test
 # Build
 make build
 
-# Run locally
-./bin/gitrewrite -repo=/path/to/test/repo
+# Run locally with dry-run for safety during development
+./bin/gitrewrite -repo=/path/to/test/repo -dry-run
 ```
