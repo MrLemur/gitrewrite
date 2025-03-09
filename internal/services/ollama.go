@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/MrLemur/gitrewrite/internal/models"
 	"github.com/MrLemur/gitrewrite/internal/ui"
@@ -101,7 +102,17 @@ func GenerateNewCommitMessage(commit models.CommitOutput, model string, temperat
 	err = json.Unmarshal([]byte(resp), &newCommit)
 	if err != nil {
 		ui.LogError("Failed to unmarshal Ollama response: %v", err)
-		return models.NewCommitMessage{}, fmt.Errorf("Failed to unmarshal Ollama response: %v", err)
+
+		// Include raw response for debugging
+		truncatedResp := resp
+		if len(resp) > 1000 {
+			truncatedResp = resp[:997] + "..."
+		}
+		ui.LogError("Raw response from Ollama API (truncated):")
+		for _, line := range strings.Split(truncatedResp, "\n") {
+			ui.LogError("  %s", line)
+		}
+		return models.NewCommitMessage{}, fmt.Errorf("Failed to unmarshal Ollama response: %v. See logs for details", err)
 	}
 
 	ui.UpdateStatus("Ready")
