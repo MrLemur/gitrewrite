@@ -69,6 +69,9 @@ func RunApplication() {
 
 	ui.TotalCommits = len(oldCommits)
 	ui.ProcessedCommits = 0
+	ui.StartTime = time.Now()
+	ui.TotalProcessingTime = 0
+	ui.CommitTimings = make([]time.Duration, 0, ui.TotalCommits)
 	ui.UpdateProgressBar()
 	ui.LogInfo("Found %d commits that need rewriting", ui.TotalCommits)
 	if ui.TotalCommits == 0 {
@@ -102,8 +105,17 @@ func RunApplication() {
 		shortID := commit.CommitID[:8]
 		ui.LogInfo("Processing commit %s...", shortID)
 		ui.UpdateStatus(fmt.Sprintf("Processing commit %s...", shortID))
-		ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), commit.Message, "Processing...")
+		
+		// Calculate total diff size for this commit
+		totalDiffSize := 0
+		for _, file := range commit.Files {
+			totalDiffSize += len(file.Diff)
+		}
+		
+		ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, commit.Message, "Processing...")
+		ui.LastCommitStartTime = time.Now()
 		newCommit, err := services.GenerateNewCommitMessage(commit, Model, Temperature)
+		commitProcessingTime := time.Since(ui.LastCommitStartTime)
 		if err != nil {
 			ui.LogError("Failed to generate new commit message for %s: %v", shortID, err)
 			continue
@@ -117,7 +129,7 @@ func RunApplication() {
 			newMessageLines = append(newMessageLines, line)
 		}
 		newMessage := strings.Join(newMessageLines, "\n\r")
-		ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), strings.TrimSpace(commit.Message), newMessage)
+		ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, strings.TrimSpace(commit.Message), newMessage)
 		ui.LogInfo("New commit message for %s generated successfully", shortID)
 		if DryRun {
 			rewriteOutput := models.RewriteOutput{
@@ -134,6 +146,10 @@ func RunApplication() {
 				ui.LogError("Failed to reword commit %s: %v", shortID, err)
 				continue
 			}
+			
+			// Update timing statistics
+			ui.TotalProcessingTime += commitProcessingTime
+			ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
 			ui.LogSuccess("Successfully rewrote commit %s", shortID)
 		}
 		ui.ProcessedCommits++
@@ -222,6 +238,9 @@ func ApplyChangesMode(repoPath, changesFile string) {
 	})
 	ui.TotalCommits = len(commits)
 	ui.ProcessedCommits = 0
+	ui.StartTime = time.Now()
+	ui.TotalProcessingTime = 0
+	ui.CommitTimings = make([]time.Duration, 0, ui.TotalCommits)
 	ui.UpdateProgressBar()
 
 	if ui.TotalCommits > 0 {
@@ -266,10 +285,24 @@ func ApplyChangesMode(repoPath, changesFile string) {
 
 		ui.LogInfo("Rewriting commit %s...", targetID[:8])
 		ui.UpdateStatus(fmt.Sprintf("Rewriting commit %s...", targetID[:8]))
+		
+		// For apply-changes mode, we don't have the full diff information
+		// so we'll show N/A for the diff size
+		if change.FilesChanged > 0 {
+			ui.UpdateCommitDetails(targetID, change.FilesChanged, -1, strings.TrimSpace(change.OriginalMsg), change.RewrittenMsg)
+		} else {
+			ui.UpdateCommitDetails(targetID, 0, -1, strings.TrimSpace(change.OriginalMsg), change.RewrittenMsg)
+		}
+		
+		ui.LastCommitStartTime = time.Now()
 		if err := services.RewordCommit(repoPath, targetID, change.RewrittenMsg); err != nil {
 			ui.LogError("Failed to reword commit %s: %v", targetID[:8], err)
 		} else {
 			ui.LogSuccess("Successfully rewrote commit %s", targetID[:8])
+			// Record processing time for this commit
+			commitProcessingTime := time.Since(ui.LastCommitStartTime)
+			ui.TotalProcessingTime += commitProcessingTime
+			ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
 		}
 		ui.ProcessedCommits++
 		ui.UpdateProgressBar()
