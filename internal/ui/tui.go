@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -22,6 +23,11 @@ var (
 	ProcessedCommits   int
 	ConfirmationResult bool
 	ConfirmationDone   bool
+	// Timing variables for ETA calculation
+	StartTime           time.Time
+	LastCommitStartTime time.Time
+	TotalProcessingTime time.Duration
+	CommitTimings       []time.Duration
 )
 
 // SetupTUI initializes the terminal UI components
@@ -156,27 +162,67 @@ func ShowConfirmationDialog(message string) bool {
 
 // UpdateProgressBar updates the progress bar with the current status
 func UpdateProgressBar() {
-	if TotalCommits == 0 {
-		ProgressBar.SetText("[yellow]No commits to process[white]")
-		return
-	}
-	percentage := float64(ProcessedCommits) / float64(TotalCommits) * 100
-	barWidth := 50
-	completedWidth := int(float64(barWidth) * float64(ProcessedCommits) / float64(TotalCommits))
-	progressText := fmt.Sprintf("[green]%d/%d commits processed (%.1f%%)[white]",
-		ProcessedCommits, TotalCommits, percentage)
-	bar := ""
-	for i := 0; i < barWidth; i++ {
-		if i < completedWidth {
-			bar += "[green]█[white]"
-		} else {
-			bar += "[gray]░[white]"
-		}
-	}
-	ProgressBar.SetText(fmt.Sprintf("%s %s", bar, progressText))
-	App.Draw()
+    if TotalCommits == 0 {
+        ProgressBar.SetText("[yellow]No commits to process[white]")
+        return
+    }
+    percentage := float64(ProcessedCommits) / float64(TotalCommits) * 100
+    barWidth := 50
+    completedWidth := int(float64(barWidth) * percentage / 100)
+    
+    // Calculate ETA
+    var etaText string
+    if ProcessedCommits > 0 {
+        // Calculate average time per commit
+        var avgTimePerCommit time.Duration
+        
+        // Only use timing data if we have any
+        if len(CommitTimings) > 0 {
+            // Use median of last few commits for more stable estimates
+            recentTimings := append([]time.Duration{}, CommitTimings...)
+            sort.Slice(recentTimings, func(i, j int) bool {
+                return recentTimings[i] < recentTimings[j]
+            })
+            medianIdx := len(recentTimings) / 2
+            avgTimePerCommit = recentTimings[medianIdx]
+        } else {
+            // Fall back to simple average if we don't have enough samples
+            if TotalProcessingTime > 0 && ProcessedCommits > 0 {
+                avgTimePerCommit = TotalProcessingTime / time.Duration(ProcessedCommits)
+            } else {
+                // Default to 5 seconds if we don't have data yet
+                avgTimePerCommit = 5 * time.Second
+            }
+        }
+        
+        // Ensure we don't have a zero duration (minimum 500ms per commit)
+        if avgTimePerCommit < 500*time.Millisecond {
+            avgTimePerCommit = 500 * time.Millisecond
+        }
+        
+        // Calculate remaining time
+        remainingCommits := TotalCommits - ProcessedCommits
+        remainingTime := avgTimePerCommit * time.Duration(remainingCommits)
+        
+        // Format ETA nicely
+        etaText = fmt.Sprintf(" ETA: %s", formatDuration(remainingTime))
+    } else {
+        etaText = " ETA: calculating..."
+    }
+    
+    progressText := fmt.Sprintf("[green]%d/%d commits processed (%.1f%%)[white]%s",
+        ProcessedCommits, TotalCommits, percentage, etaText)
+    bar := ""
+    for i := 0; i < barWidth; i++ {
+        if i < completedWidth {
+            bar += "[green]█[white]"
+        } else {
+            bar += "[gray]░[white]"
+        }
+    }
+    ProgressBar.SetText(fmt.Sprintf("%s %s", bar, progressText))
+    App.Draw()
 }
-
 // LogInfo logs an informational message
 func LogInfo(format string, args ...interface{}) {
 	timestamp := time.Now().Format("15:04:05")
@@ -199,10 +245,20 @@ func LogSuccess(format string, args ...interface{}) {
 }
 
 // UpdateCommitDetails updates the details of the current commit being processed
-func UpdateCommitDetails(id string, totalFiles int, old, new string) {
+func UpdateCommitDetails(id string, totalFiles int, diffSize int, old, new string) {
 	CommitDetails.Clear()
 	fmt.Fprintf(CommitDetails, "[yellow]Commit ID:[white]\n%s\n\n", id)
-	fmt.Fprintf(CommitDetails, "[red]Total Files Changed:[white]\n%d\n\n", totalFiles)
+	fmt.Fprintf(CommitDetails, "[red]Total Files Changed:[white]\n%d\n", totalFiles)
+	
+	// Format diff size nicely
+	if diffSize >= 0 {
+		if diffSize >= 1024 {
+			fmt.Fprintf(CommitDetails, "[red]Total Diff Size:[white]\n%.2f KB\n\n", float64(diffSize)/1024)
+		} else {
+			fmt.Fprintf(CommitDetails, "[red]Total Diff Size:[white]\n%d bytes\n\n", diffSize)
+		}
+	}
+	
 	fmt.Fprintf(CommitDetails, "[yellow]Original Message:[white]\n%s\n\n", old)
 	fmt.Fprintf(CommitDetails, "[green]New Message:[white]\n%s\n", new)
 }
@@ -217,4 +273,25 @@ func MoveToLastCommit() {
 func UpdateStatus(text string) {
 	StatusBar.SetText(fmt.Sprintf("[yellow]%s[white]", text))
 	App.Draw()
+}
+
+// formatDuration formats a duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", d.Seconds())
+	}
+	
+	if d < time.Hour {
+		m := d / time.Minute
+		s := (d % time.Minute) / time.Second
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	
+	h := d / time.Hour
+	m := (d % time.Hour) / time.Minute
+	s := (d % time.Minute) / time.Second
+	
+	return fmt.Sprintf("%dh %dm %ds", h, m, s)
 }
