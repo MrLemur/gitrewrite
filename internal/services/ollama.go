@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/MrLemur/gitrewrite/internal/models"
@@ -37,22 +38,99 @@ func SendOllamaMessage(model string, messages []ollama.Message, format json.RawM
 	return response, nil
 }
 
+// CheckOllamaAvailability checks if the Ollama server is available
+func CheckOllamaAvailability() error {
+	client, err := ollama.ClientFromEnvironment()
+	if err != nil {
+		return fmt.Errorf("failed to create Ollama client: %v", err)
+	}
+	
+	ctx := context.Background()
+	_, err = client.List(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect to Ollama server: %v", err)
+	}
+	
+	return nil
+}
+
+// GetModelContextSize retrieves the context window size for a model
+func GetModelContextSize(model string) (int, error) {
+	client, err := ollama.ClientFromEnvironment()
+	if err != nil {
+		return 0, fmt.Errorf("failed to create Ollama client: %v", err)
+	}
+	
+	ctx := context.Background()
+	modelInfo, err := client.Show(ctx, &ollama.ShowRequest{Name: model})
+	if err != nil {
+		return 0, fmt.Errorf("failed to get model info from Ollama: %v", err)
+	}
+	
+	// Context size is in modelInfo.ModelInfo under a key like "model_name.context_length"
+	if modelInfo.ModelInfo == nil {
+		return 0, fmt.Errorf("no model info available for %s", model)
+	}
+	
+	// Look for the context_length key - it should be in the format "prefix.context_length"
+	var contextSize int
+	for key, value := range modelInfo.ModelInfo {
+		if strings.HasSuffix(key, ".context_length") {
+			// Try to convert the value to an integer
+			switch v := value.(type) {
+			case float64:
+				contextSize = int(v)
+				ui.LogInfo("Found context size %d from key %s", contextSize, key)
+				break
+			case int:
+				contextSize = v
+				ui.LogInfo("Found context size %d from key %s", contextSize, key)
+				break
+			case int64:
+				contextSize = int(v)
+				ui.LogInfo("Found context size %d from key %s", contextSize, key)
+				break
+			case string:
+				// Parse string to int
+				if intVal, err := strconv.Atoi(v); err == nil {
+					contextSize = intVal
+					ui.LogInfo("Found context size %d from key %s", contextSize, key)
+					break
+				}
+			}
+		}
+	}
+	
+	// If we couldn't extract a context size, return an error
+	if contextSize == 0 {
+		return 0, fmt.Errorf("could not determine context size for model %s", model)
+	}
+	
+	return contextSize, nil
+}
+
+// EstimateTokenCount provides a rough estimate of token count for text
+func EstimateTokenCount(text string) int {
+	// Simple estimation: ~4 characters per token for English text
+	// This is a rough approximation and varies by tokenizer
+	return len(text) / 4
+}
+
 // GenerateNewCommitMessage generates a new commit message using Ollama
-func GenerateNewCommitMessage(commit models.CommitOutput, model string, temperature float64) (models.NewCommitMessage, error) {
+func GenerateNewCommitMessage(commit models.CommitOutput, model string, temperature float64, contextSize int) (models.NewCommitMessage, error) {
 	ui.UpdateStatus("Generating new commit message...")
+	systemPrompt := "Act as a senior engineer enforcing Conventional Commits. Input: Commit data with ID/message/diffs. Output: JSON with commit_id and messages array. Each message object will contain the field type, desciption and affected app. Rules:\n" +
+		"1. Types: feat, fix, chore, docs, refactor, perf\n" +
+		"2. Max 100 characters\n" +
+		"3. Explain what changed + why\n" +
+		"4. One message per logical change\n" +
+		"5. Group related files under one message\n" +
+		"6. Never use markdown/symbols\n" +
+		"7. Distill affect app name from the file path." +
+		"8: Example: {'type':'chore','description':'upgrade Docker image to v21.3.1','affected_app':'hortusfox'}"
+	
 	messages := []ollama.Message{
-		{
-			Role: "system",
-			Content: "Act as a senior engineer enforcing Conventional Commits. Input: Commit data with ID/message/diffs. Output: JSON with commit_id and messages array. Each message object will contain the field type, desciption and affected app. Rules:\n" +
-				"1. Types: feat, fix, chore, docs, refactor, perf\n" +
-				"2. Max 100 characters\n" +
-				"3. Explain what changed + why\n" +
-				"4. One message per logical change\n" +
-				"5. Group related files under one message\n" +
-				"6. Never use markdown/symbols\n" +
-				"7. Distill affect app name from the file path." +
-				"8: Example: {'type':'chore','description':'upgrade Docker image to v21.3.1','affected_app':'hortusfox'}",
-		},
+		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: "Generate a new commit message for the following commit:"},
 	}
 	format := models.OllamaOutputFormat{
@@ -71,34 +149,45 @@ func GenerateNewCommitMessage(commit models.CommitOutput, model string, temperat
 		Required: []string{"commit_id", "messages"},
 	}
 
-	// Process files to handle large diffs
-	var processedFiles []models.File
-	for _, file := range commit.Files {
-		var processedFile models.File
-		if len(file.Diff) > 2048 {
-			processedFile = models.File{Diff: file.Diff[:2048], Path: file.Path}
-		} else {
-			processedFile = file
-		}
-		processedFiles = append(processedFiles, processedFile)
-	}
-	commit.Files = processedFiles
-
-	var newCommit models.NewCommitMessage
-
+	// Estimate token count
+	systemTokens := EstimateTokenCount(systemPrompt)
+	userPromptTokens := EstimateTokenCount("Generate a new commit message for the following commit:")
+	
+	// Convert commit to JSON to estimate its token count
 	commitJSON, _ := json.Marshal(commit)
+	commitTokens := EstimateTokenCount(string(commitJSON))
+	
+	// Format tokens (usually small)
 	formatJSON, _ := json.Marshal(format)
+	formatTokens := EstimateTokenCount(string(formatJSON))
+	
+	// Calculate total tokens needed for the request
+	totalTokens := systemTokens + userPromptTokens + commitTokens + formatTokens
+	
+	// Add buffer for model's response (typically 25% of context)
+	responseBuffer := contextSize / 4
+	
+	// Check if we'll exceed the context window
+	if totalTokens + responseBuffer > contextSize {
+		ui.LogError("Commit %s would exceed model context window (%d tokens needed, %d available)", 
+			commit.CommitID[:8], totalTokens + responseBuffer, contextSize)
+		return models.NewCommitMessage{}, fmt.Errorf("commit would exceed model context window (%d tokens needed, %d available)", 
+			totalTokens + responseBuffer, contextSize)
+	}
+	
 	formatRaw := json.RawMessage(formatJSON)
-
+	
+	// Add commit as user message
 	messages = append(messages, ollama.Message{Role: "user", Content: string(commitJSON)})
 
-	ui.LogInfo("Sending commit %s to Ollama for processing", commit.CommitID[:8])
+	ui.LogInfo("Sending commit %s to Ollama for processing (est. %d tokens)", commit.CommitID[:8], totalTokens)
 	resp, err := SendOllamaMessage(model, messages, formatRaw, temperature)
 	if err != nil {
 		ui.LogError("Failed to send Ollama message: %v", err)
 		return models.NewCommitMessage{}, fmt.Errorf("Failed to send Ollama message: %v", err)
 	}
 
+	var newCommit models.NewCommitMessage
 	err = json.Unmarshal([]byte(resp), &newCommit)
 	if err != nil {
 		// Truncate the response if it's very large

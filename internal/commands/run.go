@@ -16,6 +16,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
+// Local reference to the model context size
+var modelContextSize int 
+
 // RunApplication runs the main application logic
 func RunApplication() {
 	if RepoPath == "" {
@@ -30,6 +33,30 @@ func RunApplication() {
 		ui.UpdateStatus("Press Ctrl+C to exit")
 		select {}
 	}
+
+	// Check Ollama availability and get model context size
+	ui.UpdateStatus("Checking Ollama availability...")
+	ui.LogInfo("Checking if Ollama is available...")
+	if err := services.CheckOllamaAvailability(); err != nil {
+		ui.LogError("Failed to connect to Ollama: %v", err)
+		ui.UpdateStatus("Error: Failed to connect to Ollama")
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Failed to connect to Ollama: %v", err)
+	}
+	
+	ui.UpdateStatus("Getting model information...")
+	ui.LogInfo("Getting context size for model: %s", Model)
+	contextSize, err := services.GetModelContextSize(Model)
+	if err != nil {
+		ui.LogError("Failed to get context size for model %s: %v", Model, err)
+		ui.UpdateStatus("Error: Failed to determine model context size")
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Failed to determine context size for model %s: %v", Model, err)
+	}
+	modelContextSize = contextSize  // Use our local variable
+	ui.LogInfo("Using context size of %d tokens for model %s", modelContextSize, Model)
 
 	if DryRun {
 		ui.LogInfo("Running in dry run mode - changes will not be applied")
@@ -114,7 +141,7 @@ func RunApplication() {
 		
 		ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, commit.Message, "Processing...")
 		ui.LastCommitStartTime = time.Now()
-		newCommit, err := services.GenerateNewCommitMessage(commit, Model, Temperature)
+		newCommit, err := services.GenerateNewCommitMessage(commit, Model, Temperature, modelContextSize)
 		commitProcessingTime := time.Since(ui.LastCommitStartTime)
 		if err != nil {
 			ui.LogError("Failed to generate new commit message for %s: %v", shortID, err)
