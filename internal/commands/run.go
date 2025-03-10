@@ -20,7 +20,7 @@ import (
 )
 
 // Local reference to the model context size
-var modelContextSize int 
+var modelContextSize int
 
 // Helper function to check if a file should be excluded
 func shouldExcludeFile(path string, excludePattern *regexp.Regexp) bool {
@@ -55,7 +55,7 @@ func RunApplication() {
 		ui.App.Stop()
 		log.Fatalf("Failed to connect to Ollama: %v", err)
 	}
-	
+
 	ui.UpdateStatus("Getting model information...")
 	ui.LogInfo("Getting context size for model: %s", Model)
 	contextSize, err := services.GetModelContextSize(Model)
@@ -66,7 +66,7 @@ func RunApplication() {
 		ui.App.Stop()
 		log.Fatalf("Failed to determine context size for model %s: %v", Model, err)
 	}
-	modelContextSize = contextSize  // Use our local variable
+	modelContextSize = contextSize // Use our local variable
 	ui.LogInfo("Using context size of %d tokens for model %s", modelContextSize, Model)
 
 	if DryRun {
@@ -136,12 +136,12 @@ func RunApplication() {
 	// Set up a channel to catch interrupt signals for clean exit
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-    
+
 	// Set up a tracker for completion
 	done := make(chan bool, 1)
-    
+
 	var rewriteOutputs []models.RewriteOutput
-    
+
 	// Check if we have an existing dry run file to resume from
 	if DryRun {
 		// Try to load existing dry run results
@@ -149,7 +149,7 @@ func RunApplication() {
 		if len(existingOutputs) > 0 {
 			ui.LogInfo("Found existing dry run results with %d processed commits. Resuming...", len(existingOutputs))
 			rewriteOutputs = existingOutputs
-            
+
 			// Filter out already processed commits
 			var remainingCommits []models.CommitOutput
 			for _, commit := range oldCommits {
@@ -157,7 +157,7 @@ func RunApplication() {
 					remainingCommits = append(remainingCommits, commit)
 				}
 			}
-            
+
 			ui.LogInfo("Skipping %d already processed commits", len(oldCommits)-len(remainingCommits))
 			oldCommits = remainingCommits
 			ui.ProcessedCommits = len(existingOutputs)
@@ -181,88 +181,132 @@ func RunApplication() {
 	// Start a goroutine to process all commits
 	go func() {
 		for _, commit := range oldCommits {
-			if len(commit.Files) > 200 {
-				ui.LogError("Skipping commit with too many files (%d) for processing.", len(commit.Files))
-				continue
-			}
-            
-			if ui.ProcessedCommits > 0 {
-				ui.MoveToLastCommit()
-			}
-            
-			shortID := commit.CommitID[:8]
-			ui.LogInfo("Processing commit %s...", shortID)
-			ui.UpdateStatus(fmt.Sprintf("Processing commit %s...", shortID))
-            
-			// Apply file exclusion pattern if needed
-			if excludePattern != nil {
-				var filteredFiles []models.File
-				for _, file := range commit.Files {
-					if !shouldExcludeFile(file.Path, excludePattern) {
-						filteredFiles = append(filteredFiles, file)
+			if len(commit.Files) > MaxFilesPerCommit {
+				shortID := commit.CommitID[:8]
+				if SummarizeOversizedCommits {
+					ui.LogInfo("Commit %s has %d files (exceeding limit of %d). Generating simplified summary...", shortID, len(commit.Files), MaxFilesPerCommit)
+					ui.UpdateStatus(fmt.Sprintf("Processing oversized commit %s...", shortID))
+
+					ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), -1, commit.Message, "Processing...")
+					ui.LastCommitStartTime = time.Now()
+
+					newMessage, err := services.GenerateSimplifiedCommitMessage(commit, Model, Temperature, modelContextSize)
+					commitProcessingTime := time.Since(ui.LastCommitStartTime)
+
+					if err != nil {
+						ui.LogError("Failed to generate simplified commit message for %s: %v", shortID, err)
+						continue
 					}
-				}
-                
-				skipCount := len(commit.Files) - len(filteredFiles)
-				if skipCount > 0 {
-					ui.LogInfo("Excluded %d files matching pattern from commit %s", skipCount, shortID)
-				}
-				commit.Files = filteredFiles
-			}
-            
-			// Calculate total diff size for this commit
-			totalDiffSize := 0
-			for _, file := range commit.Files {
-				totalDiffSize += len(file.Diff)
-			}
-            
-			ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, commit.Message, "Processing...")
-			ui.LastCommitStartTime = time.Now()
-			newCommit, err := services.GenerateNewCommitMessage(commit, Model, Temperature, modelContextSize)
-			commitProcessingTime := time.Since(ui.LastCommitStartTime)
-			if err != nil {
-				ui.LogError("Failed to generate new commit message for %s: %v", shortID, err)
-				continue
-			}
-			var newMessageLines []string
-			for _, msg := range newCommit.Messages {
-				if !(msg["type"] == "feat" || msg["type"] == "fix" || msg["type"] == "chore" || msg["type"] == "docs" || msg["type"] == "refactor" || msg["type"] == "perf") {
+
+					ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), -1, strings.TrimSpace(commit.Message), newMessage)
+					ui.LogInfo("Simplified commit message for %s generated successfully", shortID)
+
+					if DryRun {
+						rewriteOutput := models.RewriteOutput{
+							CommitID:     commit.CommitID,
+							OriginalMsg:  strings.TrimSpace(commit.Message),
+							RewrittenMsg: newMessage,
+							FilesChanged: len(commit.Files),
+							IsApplied:    false,
+						}
+						rewriteOutputs = append(rewriteOutputs, rewriteOutput)
+						ui.LogInfo("Added oversized commit %s to dry run output", shortID)
+					} else {
+						if err := services.RewordCommit(RepoPath, commit.CommitID, newMessage); err != nil {
+							ui.LogError("Failed to reword oversized commit %s: %v", shortID, err)
+							continue
+						}
+
+						ui.TotalProcessingTime += commitProcessingTime
+						ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
+						ui.LogSuccess("Successfully rewrote oversized commit %s", shortID)
+					}
+					ui.ProcessedCommits++
+					ui.UpdateProgressBar()
+				} else {
+					ui.LogError("Skipping commit with too many files (%d) for processing. Use -summarize-oversized to process it.", len(commit.Files))
 					continue
-				}
-				line := fmt.Sprintf("%s: %s (%s)", msg["type"], msg["description"], msg["affected_app"])
-				newMessageLines = append(newMessageLines, line)
-			}
-			newMessage := strings.Join(newMessageLines, "\n\r")
-			ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, strings.TrimSpace(commit.Message), newMessage)
-			ui.LogInfo("New commit message for %s generated successfully", shortID)
-			if DryRun {
-				rewriteOutput := models.RewriteOutput{
-					CommitID:     commit.CommitID,
-					OriginalMsg:  strings.TrimSpace(commit.Message),
-					RewrittenMsg: newMessage,
-					FilesChanged: len(commit.Files),
-					IsApplied:    false,
-				}
-				rewriteOutputs = append(rewriteOutputs, rewriteOutput)
-				ui.LogInfo("Added commit %s to dry run output", shortID)
-                
-				// Save progress periodically (every 5 commits)
-				if ui.ProcessedCommits % 5 == 0 {
-					savePartialDryRunResults(outputFilePath, rewriteOutputs)
 				}
 			} else {
-				if err := services.RewordCommit(RepoPath, newCommit.CommitID, newMessage); err != nil {
-					ui.LogError("Failed to reword commit %s: %v", shortID, err)
+
+				if ui.ProcessedCommits > 0 {
+					ui.MoveToLastCommit()
+				}
+
+				shortID := commit.CommitID[:8]
+				ui.LogInfo("Processing commit %s...", shortID)
+				ui.UpdateStatus(fmt.Sprintf("Processing commit %s...", shortID))
+
+				// Apply file exclusion pattern if needed
+				if excludePattern != nil {
+					var filteredFiles []models.File
+					for _, file := range commit.Files {
+						if !shouldExcludeFile(file.Path, excludePattern) {
+							filteredFiles = append(filteredFiles, file)
+						}
+					}
+
+					skipCount := len(commit.Files) - len(filteredFiles)
+					if skipCount > 0 {
+						ui.LogInfo("Excluded %d files matching pattern from commit %s", skipCount, shortID)
+					}
+					commit.Files = filteredFiles
+				}
+
+				// Calculate total diff size for this commit
+				totalDiffSize := 0
+				for _, file := range commit.Files {
+					totalDiffSize += len(file.Diff)
+				}
+
+				ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, commit.Message, "Processing...")
+				ui.LastCommitStartTime = time.Now()
+				newCommit, err := services.GenerateNewCommitMessage(commit, Model, Temperature, modelContextSize)
+				commitProcessingTime := time.Since(ui.LastCommitStartTime)
+				if err != nil {
+					ui.LogError("Failed to generate new commit message for %s: %v", shortID, err)
 					continue
 				}
-                
-				// Update timing statistics
-				ui.TotalProcessingTime += commitProcessingTime
-				ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
-				ui.LogSuccess("Successfully rewrote commit %s", shortID)
+				var newMessageLines []string
+				for _, msg := range newCommit.Messages {
+					if !(msg["type"] == "feat" || msg["type"] == "fix" || msg["type"] == "chore" || msg["type"] == "docs" || msg["type"] == "refactor" || msg["type"] == "perf") {
+						continue
+					}
+					line := fmt.Sprintf("%s: %s (%s)", msg["type"], msg["description"], msg["affected_app"])
+					newMessageLines = append(newMessageLines, line)
+				}
+				newMessage := strings.Join(newMessageLines, "\n\r")
+				ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, strings.TrimSpace(commit.Message), newMessage)
+				ui.LogInfo("New commit message for %s generated successfully", shortID)
+				if DryRun {
+					rewriteOutput := models.RewriteOutput{
+						CommitID:     commit.CommitID,
+						OriginalMsg:  strings.TrimSpace(commit.Message),
+						RewrittenMsg: newMessage,
+						FilesChanged: len(commit.Files),
+						IsApplied:    false,
+					}
+					rewriteOutputs = append(rewriteOutputs, rewriteOutput)
+					ui.LogInfo("Added commit %s to dry run output", shortID)
+
+					// Save progress periodically (every 5 commits)
+					if ui.ProcessedCommits%5 == 0 {
+						savePartialDryRunResults(outputFilePath, rewriteOutputs)
+					}
+				} else {
+					if err := services.RewordCommit(RepoPath, newCommit.CommitID, newMessage); err != nil {
+						ui.LogError("Failed to reword commit %s: %v", shortID, err)
+						continue
+					}
+
+					// Update timing statistics
+					ui.TotalProcessingTime += commitProcessingTime
+					ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
+					ui.LogSuccess("Successfully rewrote commit %s", shortID)
+				}
+				ui.ProcessedCommits++
+				ui.UpdateProgressBar()
 			}
-			ui.ProcessedCommits++
-			ui.UpdateProgressBar()
 		}
 
 		if DryRun && len(rewriteOutputs) > 0 {
@@ -286,7 +330,7 @@ func RunApplication() {
 			ui.UpdateStatus("All commits processed. Press Ctrl+C to exit")
 			ui.LogInfo("Finished rewriting all commits")
 		}
-        
+
 		// Signal that we're done processing
 		done <- true
 	}()
@@ -323,23 +367,23 @@ func containsCommitID(ids []string, id string) bool {
 func loadExistingDryRunResults(filePath string) ([]models.RewriteOutput, []string) {
 	var outputs []models.RewriteOutput
 	var commitIDs []string
-    
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		// File doesn't exist or can't be read, return empty results
 		return outputs, commitIDs
 	}
-    
+
 	if err := json.Unmarshal(data, &outputs); err != nil {
 		ui.LogError("Failed to parse existing dry run file: %v", err)
 		return outputs, commitIDs
 	}
-    
+
 	// Extract commit IDs for quick lookup
 	for _, output := range outputs {
 		commitIDs = append(commitIDs, output.CommitID)
 	}
-    
+
 	return outputs, commitIDs
 }
 
@@ -348,19 +392,19 @@ func savePartialDryRunResults(filePath string, outputs []models.RewriteOutput) {
 	if len(outputs) == 0 {
 		return
 	}
-    
+
 	outputData, err := json.MarshalIndent(outputs, "", "  ")
 	if err != nil {
 		ui.LogError("Failed to marshal partial dry run results: %v", err)
 		return
 	}
-    
+
 	err = os.WriteFile(filePath, outputData, 0644)
 	if err != nil {
 		ui.LogError("Failed to write partial dry run results to file: %v", err)
 		return
 	}
-    
+
 	ui.LogInfo("Saved partial dry run results with %d commits to %s", len(outputs), filePath)
 }
 
@@ -469,7 +513,7 @@ func ApplyChangesMode(repoPath, changesFile string) {
 
 		ui.LogInfo("Rewriting commit %s...", targetID[:8])
 		ui.UpdateStatus(fmt.Sprintf("Rewriting commit %s...", targetID[:8]))
-		
+
 		// For apply-changes mode, we don't have the full diff information
 		// so we'll show N/A for the diff size
 		if change.FilesChanged > 0 {
@@ -477,7 +521,7 @@ func ApplyChangesMode(repoPath, changesFile string) {
 		} else {
 			ui.UpdateCommitDetails(targetID, 0, -1, strings.TrimSpace(change.OriginalMsg), change.RewrittenMsg)
 		}
-		
+
 		ui.LastCommitStartTime = time.Now()
 		if err := services.RewordCommit(repoPath, targetID, change.RewrittenMsg); err != nil {
 			ui.LogError("Failed to reword commit %s: %v", targetID[:8], err)

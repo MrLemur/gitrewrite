@@ -208,3 +208,55 @@ func GenerateNewCommitMessage(commit models.CommitOutput, model string, temperat
 	ui.UpdateStatus("Ready")
 	return newCommit, nil
 }
+
+// GenerateSimplifiedCommitMessage generates a one-line commit message for large commits
+func GenerateSimplifiedCommitMessage(commit models.CommitOutput, model string, temperature float64, contextSize int) (string, error) {
+    ui.UpdateStatus("Generating simplified commit message...")
+    
+    systemPrompt := "Act as a senior engineer. You need to create a ONE-LINE commit message in Conventional Commits format for a large commit with many files. Follow these rules:\n" +
+        "1. Use one of these types: feat, fix, chore, docs, refactor, perf\n" +
+        "2. Keep the entire message under 100 characters\n" +
+        "3. Focus on the overall purpose of the changes\n" +
+        "4. Format: type: brief description (scope)\n" +
+        "5. Return ONLY the formatted message with no explanations"
+    
+    // Create a simplified representation of the commit
+    simplifiedCommit := models.CommitOutput{
+        CommitID: commit.CommitID,
+        Message:  commit.Message,
+        // Include only a sample of files to avoid overwhelming the model
+        Files:    commit.Files[:min(10, len(commit.Files))],
+    }
+    
+    fileInfoMsg := fmt.Sprintf("Note: This commit contains %d files total. Only a sample is provided.", len(commit.Files))
+    
+    messages := []ollama.Message{
+        {Role: "system", Content: systemPrompt},
+        {Role: "user", Content: "Generate a simple one-line commit message for this large commit:"},
+        {Role: "user", Content: fileInfoMsg},
+    }
+    
+    commitJSON, _ := json.Marshal(simplifiedCommit)
+    messages = append(messages, ollama.Message{Role: "user", Content: string(commitJSON)})
+    
+    resp, err := SendOllamaMessage(model, messages, nil, temperature)
+    if err != nil {
+        return "", err
+    }
+    
+    // Ensure it's a single line
+    resp = strings.TrimSpace(resp)
+    if strings.Contains(resp, "\n") {
+        resp = strings.Split(resp, "\n")[0]
+    }
+    
+    return resp, nil
+}
+
+// Helper function
+func min(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
