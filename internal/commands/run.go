@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/MrLemur/gitrewrite/internal/models"
@@ -84,6 +86,7 @@ func RunApplication() {
 		log.Fatalf("Failed to open repository at %s: %v", RepoPath, err)
 	}
 
+
 	// Get commits to rewrite
 	oldCommits, err := services.GetCommitsToRewrite(repo, MaxMsgLength, MaxDiffLength)
 	if err != nil {
@@ -105,6 +108,38 @@ func RunApplication() {
 		ui.LogInfo("No commits to process. Exiting.")
 		ui.UpdateStatus("No commits to process. Press Ctrl+C to exit")
 		select {}
+	}
+
+	// Set up a channel to catch interrupt signals for clean exit
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+    
+	// Set up a tracker for completion
+	done := make(chan bool, 1)
+    
+	var rewriteOutputs []models.RewriteOutput
+    
+	// Check if we have an existing dry run file to resume from
+	if DryRun {
+		// Try to load existing dry run results
+		existingOutputs, processedCommitIDs := loadExistingDryRunResults(outputFilePath)
+		if len(existingOutputs) > 0 {
+			ui.LogInfo("Found existing dry run results with %d processed commits. Resuming...", len(existingOutputs))
+			rewriteOutputs = existingOutputs
+            
+			// Filter out already processed commits
+			var remainingCommits []models.CommitOutput
+			for _, commit := range oldCommits {
+				if !containsCommitID(processedCommitIDs, commit.CommitID) {
+					remainingCommits = append(remainingCommits, commit)
+				}
+			}
+            
+			ui.LogInfo("Skipping %d already processed commits", len(oldCommits)-len(remainingCommits))
+			oldCommits = remainingCommits
+			ui.ProcessedCommits = len(existingOutputs)
+			ui.UpdateProgressBar()
+		}
 	}
 
 	// Add confirmation dialog if we're not in dry run mode
@@ -182,29 +217,159 @@ func RunApplication() {
 		ui.ProcessedCommits++
 		ui.UpdateProgressBar()
 	}
-
-	if DryRun && len(rewriteOutputs) > 0 {
-		ui.UpdateStatus("Saving dry run results...")
-		ui.LogInfo("Saving dry run results to %s", outputFilePath)
-		outputData, err := json.MarshalIndent(rewriteOutputs, "", "  ")
-		if err != nil {
-			ui.LogError("Failed to marshal dry run results: %v", err)
-			ui.UpdateStatus("Error: Failed to save dry run results")
-		} else {
-			err = os.WriteFile(outputFilePath, outputData, 0644)
+            
+			// Calculate total diff size for this commit
+			totalDiffSize := 0
+			for _, file := range commit.Files {
+				totalDiffSize += len(file.Diff)
+			}
+            
+			ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, commit.Message, "Processing...")
+			ui.LastCommitStartTime = time.Now()
+			newCommit, err := services.GenerateNewCommitMessage(commit, Model, Temperature, modelContextSize)
+			commitProcessingTime := time.Since(ui.LastCommitStartTime)
 			if err != nil {
-				ui.LogError("Failed to write dry run results to file: %v", err)
+				ui.LogError("Failed to generate new commit message for %s: %v", shortID, err)
+				continue
+			}
+			var newMessageLines []string
+			for _, msg := range newCommit.Messages {
+				if !(msg["type"] == "feat" || msg["type"] == "fix" || msg["type"] == "chore" || msg["type"] == "docs" || msg["type"] == "refactor" || msg["type"] == "perf") {
+					continue
+				}
+				line := fmt.Sprintf("%s: %s (%s)", msg["type"], msg["description"], msg["affected_app"])
+				newMessageLines = append(newMessageLines, line)
+			}
+			newMessage := strings.Join(newMessageLines, "\n\r")
+			ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, strings.TrimSpace(commit.Message), newMessage)
+			ui.LogInfo("New commit message for %s generated successfully", shortID)
+			if DryRun {
+				rewriteOutput := models.RewriteOutput{
+					CommitID:     commit.CommitID,
+					OriginalMsg:  strings.TrimSpace(commit.Message),
+					RewrittenMsg: newMessage,
+					FilesChanged: len(commit.Files),
+					IsApplied:    false,
+				}
+				rewriteOutputs = append(rewriteOutputs, rewriteOutput)
+				ui.LogInfo("Added commit %s to dry run output", shortID)
+                
+				// Save progress periodically (every 5 commits)
+				if ui.ProcessedCommits % 5 == 0 {
+					savePartialDryRunResults(outputFilePath, rewriteOutputs)
+				}
+			} else {
+				if err := services.RewordCommit(RepoPath, newCommit.CommitID, newMessage); err != nil {
+					ui.LogError("Failed to reword commit %s: %v", shortID, err)
+					continue
+				}
+                
+				// Update timing statistics
+				ui.TotalProcessingTime += commitProcessingTime
+				ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
+				ui.LogSuccess("Successfully rewrote commit %s", shortID)
+			}
+			ui.ProcessedCommits++
+			ui.UpdateProgressBar()
+		}
+
+		if DryRun && len(rewriteOutputs) > 0 {
+			ui.UpdateStatus("Saving dry run results...")
+			ui.LogInfo("Saving dry run results to %s", outputFilePath)
+			outputData, err := json.MarshalIndent(rewriteOutputs, "", "  ")
+			if err != nil {
+				ui.LogError("Failed to marshal dry run results: %v", err)
 				ui.UpdateStatus("Error: Failed to save dry run results")
 			} else {
-				ui.LogSuccess("Dry run results saved successfully to %s", outputFilePath)
-				ui.UpdateStatus("Dry run completed. Press Ctrl+C to exit")
+				err = os.WriteFile(outputFilePath, outputData, 0644)
+				if err != nil {
+					ui.LogError("Failed to write dry run results to file: %v", err)
+					ui.UpdateStatus("Error: Failed to save dry run results")
+				} else {
+					ui.LogSuccess("Dry run results saved successfully to %s", outputFilePath)
+					ui.UpdateStatus("Dry run completed. Press Ctrl+C to exit")
+				}
 			}
+		} else {
+			ui.UpdateStatus("All commits processed. Press Ctrl+C to exit")
+			ui.LogInfo("Finished rewriting all commits")
 		}
-	} else {
-		ui.UpdateStatus("All commits processed. Press Ctrl+C to exit")
-		ui.LogInfo("Finished rewriting all commits")
+        
+		// Signal that we're done processing
+		done <- true
+	}()
+
+	// Wait for either completion or interrupt
+	select {
+	case <-sigs:
+		// Handle clean shutdown on interrupt
+		ui.LogInfo("Received interrupt signal, shutting down...")
+		if DryRun && len(rewriteOutputs) > 0 {
+			ui.UpdateStatus("Saving partial dry run results...")
+			ui.LogInfo("Saving partial dry run results to %s", outputFilePath)
+			savePartialDryRunResults(outputFilePath, rewriteOutputs)
+		}
+		ui.App.Stop()
+		os.Exit(0)
+	case <-done:
+		// Wait for user to exit
+		select {}
 	}
-	select {}
+}
+
+// Helper function to check if a commit ID is in a slice
+func containsCommitID(ids []string, id string) bool {
+	for _, existingID := range ids {
+		if existingID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// Helper function to load existing dry run results
+func loadExistingDryRunResults(filePath string) ([]models.RewriteOutput, []string) {
+	var outputs []models.RewriteOutput
+	var commitIDs []string
+    
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		// File doesn't exist or can't be read, return empty results
+		return outputs, commitIDs
+	}
+    
+	if err := json.Unmarshal(data, &outputs); err != nil {
+		ui.LogError("Failed to parse existing dry run file: %v", err)
+		return outputs, commitIDs
+	}
+    
+	// Extract commit IDs for quick lookup
+	for _, output := range outputs {
+		commitIDs = append(commitIDs, output.CommitID)
+	}
+    
+	return outputs, commitIDs
+}
+
+// Helper function to save partial dry run results
+func savePartialDryRunResults(filePath string, outputs []models.RewriteOutput) {
+	if len(outputs) == 0 {
+		return
+	}
+    
+	outputData, err := json.MarshalIndent(outputs, "", "  ")
+	if err != nil {
+		ui.LogError("Failed to marshal partial dry run results: %v", err)
+		return
+	}
+    
+	err = os.WriteFile(filePath, outputData, 0644)
+	if err != nil {
+		ui.LogError("Failed to write partial dry run results to file: %v", err)
+		return
+	}
+    
+	ui.LogInfo("Saved partial dry run results with %d commits to %s", len(outputs), filePath)
 }
 
 // ApplyChangesMode reads a JSON file with rewrite outputs and applies each change
