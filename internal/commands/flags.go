@@ -14,6 +14,7 @@ var (
 	DryRun           bool
 	OutputFile       string
 	ApplyChangesFile string
+	ExcludeFiles     string // New flag for file exclusion regex
 )
 
 // ParseFlags parses command line flags
@@ -26,5 +27,6 @@ func ParseFlags() {
 	flag.BoolVar(&DryRun, "dry-run", false, "Generate new commit messages but don't apply them")
 	flag.StringVar(&OutputFile, "output", "", "Custom path for dry run output file (default: repo-name-rewrite-changes.json)")
 	flag.StringVar(&ApplyChangesFile, "apply-changes", "", "Path to JSON file with commit rewrite changes to apply directly without using Ollama")
+	flag.StringVar(&ExcludeFiles, "exclude", "", "Regex pattern to exclude matching files from diff processing")
 	flag.Parse()
 }

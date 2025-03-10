@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -20,6 +21,14 @@ import (
 
 // Local reference to the model context size
 var modelContextSize int 
+
+// Helper function to check if a file should be excluded
+func shouldExcludeFile(path string, excludePattern *regexp.Regexp) bool {
+	if excludePattern == nil {
+		return false
+	}
+	return excludePattern.MatchString(path)
+}
 
 // RunApplication runs the main application logic
 func RunApplication() {
@@ -86,6 +95,20 @@ func RunApplication() {
 		log.Fatalf("Failed to open repository at %s: %v", RepoPath, err)
 	}
 
+	// Compile the exclude pattern if provided
+	var excludePattern *regexp.Regexp
+	if ExcludeFiles != "" {
+		var err error
+		excludePattern, err = regexp.Compile(ExcludeFiles)
+		if err != nil {
+			ui.LogError("Invalid exclude pattern: %v", err)
+			ui.UpdateStatus("Error: Invalid exclude pattern")
+			time.Sleep(2 * time.Second)
+			ui.App.Stop()
+			log.Fatalf("Invalid exclude pattern: %v", err)
+		}
+		ui.LogInfo("Using exclude pattern: %s", ExcludeFiles)
+	}
 
 	// Get commits to rewrite
 	oldCommits, err := services.GetCommitsToRewrite(repo, MaxMsgLength, MaxDiffLength)
@@ -154,69 +177,38 @@ func RunApplication() {
 	}
 
 	ui.LastCommitDetails.SetText("[yellow]No commits processed yet[white]")
-	var rewriteOutputs []models.RewriteOutput
 
-	for _, commit := range oldCommits {
-		if len(commit.Files) > 200 {
-			ui.LogError("Skipping commit with too many files (%d) for processing.", len(commit.Files))
-			continue
-		}
-		if ui.ProcessedCommits > 0 {
-			ui.MoveToLastCommit()
-		}
-		shortID := commit.CommitID[:8]
-		ui.LogInfo("Processing commit %s...", shortID)
-		ui.UpdateStatus(fmt.Sprintf("Processing commit %s...", shortID))
-		
-		// Calculate total diff size for this commit
-		totalDiffSize := 0
-		for _, file := range commit.Files {
-			totalDiffSize += len(file.Diff)
-		}
-		
-		ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, commit.Message, "Processing...")
-		ui.LastCommitStartTime = time.Now()
-		newCommit, err := services.GenerateNewCommitMessage(commit, Model, Temperature, modelContextSize)
-		commitProcessingTime := time.Since(ui.LastCommitStartTime)
-		if err != nil {
-			ui.LogError("Failed to generate new commit message for %s: %v", shortID, err)
-			continue
-		}
-		var newMessageLines []string
-		for _, msg := range newCommit.Messages {
-			if !(msg["type"] == "feat" || msg["type"] == "fix" || msg["type"] == "chore" || msg["type"] == "docs" || msg["type"] == "refactor" || msg["type"] == "perf") {
+	// Start a goroutine to process all commits
+	go func() {
+		for _, commit := range oldCommits {
+			if len(commit.Files) > 200 {
+				ui.LogError("Skipping commit with too many files (%d) for processing.", len(commit.Files))
 				continue
 			}
-			line := fmt.Sprintf("%s: %s (%s)", msg["type"], msg["description"], msg["affected_app"])
-			newMessageLines = append(newMessageLines, line)
-		}
-		newMessage := strings.Join(newMessageLines, "\n\r")
-		ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, strings.TrimSpace(commit.Message), newMessage)
-		ui.LogInfo("New commit message for %s generated successfully", shortID)
-		if DryRun {
-			rewriteOutput := models.RewriteOutput{
-				CommitID:     commit.CommitID,
-				OriginalMsg:  strings.TrimSpace(commit.Message),
-				RewrittenMsg: newMessage,
-				FilesChanged: len(commit.Files),
-				IsApplied:    false,
+            
+			if ui.ProcessedCommits > 0 {
+				ui.MoveToLastCommit()
 			}
-			rewriteOutputs = append(rewriteOutputs, rewriteOutput)
-			ui.LogInfo("Added commit %s to dry run output", shortID)
-		} else {
-			if err := services.RewordCommit(RepoPath, newCommit.CommitID, newMessage); err != nil {
-				ui.LogError("Failed to reword commit %s: %v", shortID, err)
-				continue
+            
+			shortID := commit.CommitID[:8]
+			ui.LogInfo("Processing commit %s...", shortID)
+			ui.UpdateStatus(fmt.Sprintf("Processing commit %s...", shortID))
+            
+			// Apply file exclusion pattern if needed
+			if excludePattern != nil {
+				var filteredFiles []models.File
+				for _, file := range commit.Files {
+					if !shouldExcludeFile(file.Path, excludePattern) {
+						filteredFiles = append(filteredFiles, file)
+					}
+				}
+                
+				skipCount := len(commit.Files) - len(filteredFiles)
+				if skipCount > 0 {
+					ui.LogInfo("Excluded %d files matching pattern from commit %s", skipCount, shortID)
+				}
+				commit.Files = filteredFiles
 			}
-			
-			// Update timing statistics
-			ui.TotalProcessingTime += commitProcessingTime
-			ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
-			ui.LogSuccess("Successfully rewrote commit %s", shortID)
-		}
-		ui.ProcessedCommits++
-		ui.UpdateProgressBar()
-	}
             
 			// Calculate total diff size for this commit
 			totalDiffSize := 0
