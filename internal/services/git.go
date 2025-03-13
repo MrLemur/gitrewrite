@@ -106,6 +106,27 @@ func RewordCommit(repoPath, targetCommit, newMessage string) error {
 		"GIT_EDITOR="+tempEditor.Name(),
 	)
 
+	// Remove any existing rebase-merge directory
+	mergeDir := filepath.Join(repoPath, ".git", "rebase-merge")
+	if _, err := os.Stat(mergeDir); err == nil {
+		if err := os.RemoveAll(mergeDir); err != nil {
+			return fmt.Errorf("failed to remove rebase-merge directory: %v", err)
+		}
+	}
+
+	// Clear any existing rebase state
+	clearCmd := exec.Command("git", "rebase", "--abort")
+	clearCmd.Dir = repoPath
+	clearCmd.Env = env
+	output, err := clearCmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "No rebase in progress?") {
+			// No rebase in progress, ignore
+		} else {
+			return fmt.Errorf("failed to clear rebase state: %v\nOutput: %s", err, output)
+		}
+	}
+
 	// Execute rebase to rewrite the commit message
 	args := []string{"rebase", "-i"}
 	if base == "--root" {
@@ -117,7 +138,7 @@ func RewordCommit(repoPath, targetCommit, newMessage string) error {
 	rebaseCmd.Dir = repoPath
 	rebaseCmd.Env = env
 
-	output, err := rebaseCmd.CombinedOutput()
+	output, err = rebaseCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("rebase failed: %v\nOutput: %s", err, output)
 	}
