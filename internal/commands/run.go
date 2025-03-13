@@ -181,6 +181,21 @@ func RunApplication() {
 	// Start a goroutine to process all commits
 	go func() {
 		for _, commit := range oldCommits {
+			// Apply file exclusion pattern if needed
+			if excludePattern != nil {
+				var filteredFiles []models.File
+				for _, file := range commit.Files {
+					if !shouldExcludeFile(file.Path, excludePattern) {
+						filteredFiles = append(filteredFiles, file)
+					}
+				}
+
+				skipCount := len(commit.Files) - len(filteredFiles)
+				if skipCount > 0 {
+					ui.LogInfo("Excluded %d files matching pattern from commit %s", skipCount, commit.CommitID[:8])
+				}
+				commit.Files = filteredFiles
+			}
 			if len(commit.Files) > MaxFilesPerCommit {
 				shortID := commit.CommitID[:8]
 				if SummarizeOversizedCommits {
@@ -236,22 +251,6 @@ func RunApplication() {
 				shortID := commit.CommitID[:8]
 				ui.LogInfo("Processing commit %s...", shortID)
 				ui.UpdateStatus(fmt.Sprintf("Processing commit %s...", shortID))
-
-				// Apply file exclusion pattern if needed
-				if excludePattern != nil {
-					var filteredFiles []models.File
-					for _, file := range commit.Files {
-						if !shouldExcludeFile(file.Path, excludePattern) {
-							filteredFiles = append(filteredFiles, file)
-						}
-					}
-
-					skipCount := len(commit.Files) - len(filteredFiles)
-					if skipCount > 0 {
-						ui.LogInfo("Excluded %d files matching pattern from commit %s", skipCount, shortID)
-					}
-					commit.Files = filteredFiles
-				}
 
 				// Calculate total diff size for this commit
 				totalDiffSize := 0

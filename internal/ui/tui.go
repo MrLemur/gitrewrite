@@ -3,7 +3,10 @@ package ui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -28,6 +31,10 @@ var (
 	LastCommitStartTime time.Time
 	TotalProcessingTime time.Duration
 	CommitTimings       []time.Duration
+	// Debug logging variables
+	debugLogger    *os.File
+	debugLogMutex  sync.Mutex
+	isDebugLogging bool
 )
 
 // SetupTUI initializes the terminal UI components
@@ -129,6 +136,61 @@ func SetupTUI() {
 	})
 }
 
+// InitDebugLogging sets up debug logging to a file if a path is provided
+func InitDebugLogging(logFilePath string) error {
+	if logFilePath == "" {
+		return nil // Debug logging not enabled
+	}
+
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(logFilePath)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create debug log directory: %v", err)
+		}
+	}
+
+	// Open log file for writing (create if not exists, append if exists)
+	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open debug log file: %v", err)
+	}
+
+	debugLogger = file
+	isDebugLogging = true
+
+	// Log start of session
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	fmt.Fprintf(debugLogger, "\n\n===== DEBUG LOG SESSION STARTED AT %s =====\n\n", timestamp)
+
+	return nil
+}
+
+// CloseDebugLog closes the debug log file if it's open
+func CloseDebugLog() {
+	if debugLogger != nil {
+		timestamp := time.Now().Format("2006-01-02 15:04:05")
+		fmt.Fprintf(debugLogger, "\n\n===== DEBUG LOG SESSION ENDED AT %s =====\n\n", timestamp)
+		debugLogger.Close()
+		debugLogger = nil
+		isDebugLogging = false
+	}
+}
+
+// LogShellCommand logs shell commands to the debug log file
+func LogShellCommand(command string, args []string, workDir string) {
+	if !isDebugLogging {
+		return
+	}
+
+	debugLogMutex.Lock()
+	defer debugLogMutex.Unlock()
+
+	fullTimestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	cmdLine := fmt.Sprintf("%s %s", command, strings.Join(args, " "))
+	fmt.Fprintf(debugLogger, "[%s] SHELL CMD: [dir=%s] %s\n", fullTimestamp, workDir, cmdLine)
+}
+
 // ShowConfirmationDialog displays a confirmation dialog and waits for user input
 func ShowConfirmationDialog(message string) bool {
 	// Reset confirmation variables
@@ -162,72 +224,80 @@ func ShowConfirmationDialog(message string) bool {
 
 // UpdateProgressBar updates the progress bar with the current status
 func UpdateProgressBar() {
-    if TotalCommits == 0 {
-        ProgressBar.SetText("[yellow]No commits to process[white]")
-        return
-    }
-    percentage := float64(ProcessedCommits) / float64(TotalCommits) * 100
-    barWidth := 50
-    completedWidth := int(float64(barWidth) * percentage / 100)
-    
-    // Calculate ETA
-    var etaText string
-    if ProcessedCommits > 0 {
-        // Calculate average time per commit
-        var avgTimePerCommit time.Duration
-        
-        // Only use timing data if we have any
-        if len(CommitTimings) > 0 {
-            // Use median of last few commits for more stable estimates
-            recentTimings := append([]time.Duration{}, CommitTimings...)
-            sort.Slice(recentTimings, func(i, j int) bool {
-                return recentTimings[i] < recentTimings[j]
-            })
-            medianIdx := len(recentTimings) / 2
-            avgTimePerCommit = recentTimings[medianIdx]
-        } else {
-            // Fall back to simple average if we don't have enough samples
-            if TotalProcessingTime > 0 && ProcessedCommits > 0 {
-                avgTimePerCommit = TotalProcessingTime / time.Duration(ProcessedCommits)
-            } else {
-                // Default to 5 seconds if we don't have data yet
-                avgTimePerCommit = 5 * time.Second
-            }
-        }
-        
-        // Ensure we don't have a zero duration (minimum 500ms per commit)
-        if avgTimePerCommit < 500*time.Millisecond {
-            avgTimePerCommit = 500 * time.Millisecond
-        }
-        
-        // Calculate remaining time
-        remainingCommits := TotalCommits - ProcessedCommits
-        remainingTime := avgTimePerCommit * time.Duration(remainingCommits)
-        
-        // Format ETA nicely
-        etaText = fmt.Sprintf(" ETA: %s", formatDuration(remainingTime))
-    } else {
-        etaText = " ETA: calculating..."
-    }
-    
-    progressText := fmt.Sprintf("[green]%d/%d commits processed (%.1f%%)[white]%s",
-        ProcessedCommits, TotalCommits, percentage, etaText)
-    bar := ""
-    for i := 0; i < barWidth; i++ {
-        if i < completedWidth {
-            bar += "[green]█[white]"
-        } else {
-            bar += "[gray]░[white]"
-        }
-    }
-    ProgressBar.SetText(fmt.Sprintf("%s %s", bar, progressText))
-    App.Draw()
+	if TotalCommits == 0 {
+		ProgressBar.SetText("[yellow]No commits to process[white]")
+		return
+	}
+	percentage := float64(ProcessedCommits) / float64(TotalCommits) * 100
+	barWidth := 50
+	completedWidth := int(float64(barWidth) * percentage / 100)
+
+	// Calculate ETA
+	var etaText string
+	if ProcessedCommits > 0 {
+		// Calculate average time per commit
+		var avgTimePerCommit time.Duration
+
+		// Only use timing data if we have any
+		if len(CommitTimings) > 0 {
+			// Use median of last few commits for more stable estimates
+			recentTimings := append([]time.Duration{}, CommitTimings...)
+			sort.Slice(recentTimings, func(i, j int) bool {
+				return recentTimings[i] < recentTimings[j]
+			})
+			medianIdx := len(recentTimings) / 2
+			avgTimePerCommit = recentTimings[medianIdx]
+		} else {
+			// Fall back to simple average if we don't have enough samples
+			if TotalProcessingTime > 0 && ProcessedCommits > 0 {
+				avgTimePerCommit = TotalProcessingTime / time.Duration(ProcessedCommits)
+			} else {
+				// Default to 5 seconds if we don't have data yet
+				avgTimePerCommit = 5 * time.Second
+			}
+		}
+
+		// Ensure we don't have a zero duration (minimum 500ms per commit)
+		if avgTimePerCommit < 500*time.Millisecond {
+			avgTimePerCommit = 500 * time.Millisecond
+		}
+
+		// Calculate remaining time
+		remainingCommits := TotalCommits - ProcessedCommits
+		remainingTime := avgTimePerCommit * time.Duration(remainingCommits)
+
+		// Format ETA nicely
+		etaText = fmt.Sprintf(" ETA: %s", formatDuration(remainingTime))
+	} else {
+		etaText = " ETA: calculating..."
+	}
+
+	progressText := fmt.Sprintf("[green]%d/%d commits processed (%.1f%%)[white]%s",
+		ProcessedCommits, TotalCommits, percentage, etaText)
+	bar := ""
+	for i := 0; i < barWidth; i++ {
+		if i < completedWidth {
+			bar += "[green]█[white]"
+		} else {
+			bar += "[gray]░[white]"
+		}
+	}
+	ProgressBar.SetText(fmt.Sprintf("%s %s", bar, progressText))
+	App.Draw()
 }
+
 // LogInfo logs an informational message
 func LogInfo(format string, args ...interface{}) {
 	timestamp := time.Now().Format("15:04:05")
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(LogView, "[blue]%s[white] [yellow]INFO[white]: %s\n", timestamp, msg)
+
+	if isDebugLogging {
+		debugLogMutex.Lock()
+		defer debugLogMutex.Unlock()
+		fullTimestamp := time.Now().Format("2006-01-02 15:04:05.000")
+		fmt.Fprintf(debugLogger, "[%s] INFO: %s\n", fullTimestamp, msg)
+	}
 }
 
 // LogError logs an error message
@@ -235,6 +305,13 @@ func LogError(format string, args ...interface{}) {
 	timestamp := time.Now().Format("15:04:05")
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(LogView, "[blue]%s[white] [red]ERROR[white]: %s\n", timestamp, msg)
+
+	if isDebugLogging {
+		debugLogMutex.Lock()
+		defer debugLogMutex.Unlock()
+		fullTimestamp := time.Now().Format("2006-01-02 15:04:05.000")
+		fmt.Fprintf(debugLogger, "[%s] ERROR: %s\n", fullTimestamp, msg)
+	}
 }
 
 // LogSuccess logs a success message
@@ -242,6 +319,13 @@ func LogSuccess(format string, args ...interface{}) {
 	timestamp := time.Now().Format("15:04:05")
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(LogView, "[blue]%s[white] [green]SUCCESS[white]: %s\n", timestamp, msg)
+
+	if isDebugLogging {
+		debugLogMutex.Lock()
+		defer debugLogMutex.Unlock()
+		fullTimestamp := time.Now().Format("2006-01-02 15:04:05.000")
+		fmt.Fprintf(debugLogger, "[%s] SUCCESS: %s\n", fullTimestamp, msg)
+	}
 }
 
 // UpdateCommitDetails updates the details of the current commit being processed
@@ -249,7 +333,7 @@ func UpdateCommitDetails(id string, totalFiles int, diffSize int, old, new strin
 	CommitDetails.Clear()
 	fmt.Fprintf(CommitDetails, "[yellow]Commit ID:[white]\n%s\n\n", id)
 	fmt.Fprintf(CommitDetails, "[red]Total Files Changed:[white]\n%d\n", totalFiles)
-	
+
 	// Format diff size nicely
 	if diffSize >= 0 {
 		if diffSize >= 1024 {
@@ -258,7 +342,7 @@ func UpdateCommitDetails(id string, totalFiles int, diffSize int, old, new strin
 			fmt.Fprintf(CommitDetails, "[red]Total Diff Size:[white]\n%d bytes\n\n", diffSize)
 		}
 	}
-	
+
 	fmt.Fprintf(CommitDetails, "[yellow]Original Message:[white]\n%s\n\n", old)
 	fmt.Fprintf(CommitDetails, "[green]New Message:[white]\n%s\n", new)
 }
@@ -278,20 +362,20 @@ func UpdateStatus(text string) {
 // formatDuration formats a duration in a human-readable way
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Second)
-	
+
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", d.Seconds())
 	}
-	
+
 	if d < time.Hour {
 		m := d / time.Minute
 		s := (d % time.Minute) / time.Second
 		return fmt.Sprintf("%dm %ds", m, s)
 	}
-	
+
 	h := d / time.Hour
 	m := (d % time.Hour) / time.Minute
 	s := (d % time.Minute) / time.Second
-	
+
 	return fmt.Sprintf("%dh %dm %ds", h, m, s)
 }

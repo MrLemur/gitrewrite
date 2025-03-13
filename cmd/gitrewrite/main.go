@@ -26,6 +26,16 @@ func main() {
 	// Parse command line flags
 	commands.ParseFlags()
 
+	// Initialize debug logging if enabled
+	if commands.DebugLogFile != "" {
+		if err := ui.InitDebugLogging(commands.DebugLogFile); err != nil {
+			fmt.Printf("Failed to initialize debug logging: %v\n", err)
+			os.Exit(1)
+		}
+		defer ui.CloseDebugLog()
+		ui.LogInfo("Debug logging enabled to %s", commands.DebugLogFile)
+	}
+
 	// Validate repository path
 	if commands.RepoPath == "" {
 		fmt.Println("Please provide a path to a git repository using -repo=/path/to/repo")

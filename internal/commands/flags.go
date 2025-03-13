@@ -15,8 +15,9 @@ var (
 	OutputFile                string
 	ApplyChangesFile          string
 	ExcludeFiles              string
-	MaxFilesPerCommit         int  // New parameter
-	SummarizeOversizedCommits bool // New parameter
+	MaxFilesPerCommit         int
+	SummarizeOversizedCommits bool
+	DebugLogFile              string
 )
 
 // ParseFlags parses command line flags
@@ -32,5 +33,6 @@ func ParseFlags() {
 	flag.StringVar(&ExcludeFiles, "exclude", "", "Regex pattern to exclude matching files from diff processing")
 	flag.IntVar(&MaxFilesPerCommit, "max-files", 200, "Maximum number of files in a commit before handling differently")
 	flag.BoolVar(&SummarizeOversizedCommits, "summarize-oversized", false, "Generate a one-line summary for commits with too many files instead of skipping them")
+	flag.StringVar(&DebugLogFile, "debug-log", "", "Path to output debug log file")
 	flag.Parse()
 }

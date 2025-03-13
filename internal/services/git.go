@@ -29,6 +29,7 @@ func safeUpdateStatus(text string) {
 func RewordCommit(repoPath, targetCommit, newMessage string) error {
 	safeUpdateStatus("Rewriting commit message...")
 	// Ensure we're in a git repository
+	ui.LogShellCommand("git", []string{"rev-parse", "--git-dir"}, repoPath)
 	cmd := exec.Command("git", "rev-parse", "--git-dir")
 	cmd.Dir = repoPath
 	if err := cmd.Run(); err != nil {
@@ -36,6 +37,7 @@ func RewordCommit(repoPath, targetCommit, newMessage string) error {
 	}
 
 	// Determine the rebase base
+	ui.LogShellCommand("git", []string{"rev-parse", targetCommit + "^"}, repoPath)
 	parentCmd := exec.Command("git", "rev-parse", targetCommit+"^")
 	parentCmd.Dir = repoPath
 	parentOutput, err := parentCmd.Output()
@@ -48,6 +50,7 @@ func RewordCommit(repoPath, targetCommit, newMessage string) error {
 	}
 
 	// Get abbreviated hash for target commit
+	ui.LogShellCommand("git", []string{"rev-parse", "--short", targetCommit}, repoPath)
 	abbrCmd := exec.Command("git", "rev-parse", "--short", targetCommit)
 	abbrCmd.Dir = repoPath
 	abbrOutput, err := abbrCmd.Output()
@@ -115,6 +118,7 @@ func RewordCommit(repoPath, targetCommit, newMessage string) error {
 	}
 
 	// Clear any existing rebase state
+	ui.LogShellCommand("git", []string{"rebase", "--abort"}, repoPath)
 	clearCmd := exec.Command("git", "rebase", "--abort")
 	clearCmd.Dir = repoPath
 	clearCmd.Env = env
@@ -134,9 +138,17 @@ func RewordCommit(repoPath, targetCommit, newMessage string) error {
 	} else {
 		args = append(args, base)
 	}
+
+	ui.LogShellCommand("git", args, repoPath)
 	rebaseCmd := exec.Command("git", args...)
 	rebaseCmd.Dir = repoPath
 	rebaseCmd.Env = env
+
+	ui.LogInfo("Command dir: %s", rebaseCmd.Dir)
+	ui.LogInfo("Command env: %v", rebaseCmd.Env)
+	// show temp editor content
+	ui.LogInfo("Temp editor content: %s", editorContent)
+	ui.LogInfo("Temp file content: %s", newMessage)
 
 	output, err = rebaseCmd.CombinedOutput()
 	if err != nil {
@@ -249,6 +261,7 @@ func GetRepoName(repoPath string) string {
 
 // ExecuteCommand runs a command and returns an error if it fails
 func ExecuteCommand(command string, args []string, dir string) error {
+	ui.LogShellCommand(command, args, dir)
 	cmd := exec.Command(command, args...)
 	cmd.Dir = dir
 	return cmd.Run()
@@ -256,6 +269,7 @@ func ExecuteCommand(command string, args []string, dir string) error {
 
 // GetCommandOutput runs a command and returns its output
 func GetCommandOutput(command string, args []string, dir string) (string, error) {
+	ui.LogShellCommand(command, args, dir)
 	cmd := exec.Command(command, args...)
 	cmd.Dir = dir
 	var out strings.Builder
