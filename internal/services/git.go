@@ -247,27 +247,6 @@ func GetRepoName(repoPath string) string {
 	return repoName
 }
 
-// FindCommitByMessage searches for a commit with a specific message
-func FindCommitByMessage(repo *git.Repository, origMsg string) (string, error) {
-	iter, err := repo.Log(&git.LogOptions{})
-	if err != nil {
-		return "", err
-	}
-	defer iter.Close()
-	var found string
-	err = iter.ForEach(func(c *object.Commit) error {
-		if strings.TrimSpace(c.Message) == strings.TrimSpace(origMsg) {
-			found = c.Hash.String()
-			return io.EOF // break out of iteration
-		}
-		return nil
-	})
-	if found == "" {
-		return "", fmt.Errorf("no commit found with message: %s", origMsg)
-	}
-	return found, nil
-}
-
 // ExecuteCommand runs a command and returns an error if it fails
 func ExecuteCommand(command string, args []string, dir string) error {
 	cmd := exec.Command(command, args...)

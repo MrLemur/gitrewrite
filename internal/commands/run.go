@@ -446,18 +446,8 @@ func ApplyChangesMode(repoPath, changesFile string) {
 	for _, change := range changes {
 		commitObj, err := repo.CommitObject(plumbing.NewHash(change.CommitID))
 		if err != nil {
-			// If not found by hash, try to find by original message.
-			foundID, err := services.FindCommitByMessage(repo, change.OriginalMsg)
-			if err != nil {
-				ui.LogError("Commit %s not found: %v", change.CommitID, err)
-				continue
-			}
-			commitObj, err = repo.CommitObject(plumbing.NewHash(foundID))
-			if err != nil {
-				ui.LogError("Error retrieving commit %s: %v", foundID, err)
-				continue
-			}
-			change.CommitID = foundID
+			ui.LogError("Error retrieving commit %s: %v", change.CommitID, err)
+			continue
 		}
 		commits = append(commits, commitWithTime{output: change, time: commitObj.Committer.When})
 	}
@@ -485,22 +475,7 @@ func ApplyChangesMode(repoPath, changesFile string) {
 	for _, entry := range commits {
 		change := entry.output
 		var targetID string
-		// First, try to look up the commit by the stored hash.
-		_, err := repo.CommitObject(plumbing.NewHash(change.CommitID))
-		if err != nil {
-			// If not found, search by original message.
-			foundID, err := services.FindCommitByMessage(repo, change.OriginalMsg)
-			if err != nil {
-				ui.LogError("Skipping change for commit with original message '%s': %v", change.OriginalMsg, err)
-				continue
-			}
-			targetID = foundID
-			ui.LogInfo("Found commit by message for original commit id %s: using %s", change.CommitID[:8], targetID[:8])
-		} else {
-			targetID = change.CommitID
-		}
 
-		// Sanity check: verify that the commit's current message matches the expected original message.
 		commitObj, err := repo.CommitObject(plumbing.NewHash(targetID))
 		if err != nil {
 			ui.LogError("Failed to retrieve commit %s: %v", targetID, err)
