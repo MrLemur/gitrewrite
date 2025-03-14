@@ -21,6 +21,7 @@
   - [Workflow Example](#workflow-example)
 - [Requirements](#requirements)
 - [Installation](#installation)
+  - [From Prebuilt Binaries](#from-prebuilt-binaries)
   - [Using Go](#using-go)
   - [From Source](#from-source)
   - [Ollama Setup](#ollama-setup)
@@ -141,10 +142,12 @@ gitrewrite -repo=/path/to/repository
    gitrewrite -repo=/path/to/repo
    ```
 
-   A confirmation dialog will appear:
+   A confirmation dialog will appear that looks like this:
 
    ```
-   WARNING: This process is irreversible and will modify your git history.
+   50 total commits found, 12 will be rewritten with improved messages. All commits will be applied to a new repository at /path/to/your-repo-rewritten.
+
+   This operation will create a new repository with the same files but improved commit messages.
 
    'No' is selected by default. Use Tab to select 'Yes' if you want to proceed.
    ```
@@ -171,6 +174,29 @@ gitrewrite -repo=/path/to/repository
 - [Ollama](https://ollama.ai/) with a large language model installed (default: qwen2.5:14b)
 
 ## Installation
+
+### From Prebuilt Binaries
+
+The easiest way to install GitRewrite is to download a prebuilt binary from the [releases page](https://github.com/MrLemur/gitrewrite/releases).
+
+1. Go to the [releases page](https://github.com/MrLemur/gitrewrite/releases)
+2. Download the appropriate binary for your system:
+   - For Linux: `gitrewrite-linux-amd64` or `gitrewrite-linux-arm64`
+   - For macOS: `gitrewrite-darwin-amd64` or `gitrewrite-darwin-arm64`
+   - For Windows: `gitrewrite-windows-amd64.exe` or `gitrewrite-windows-arm64.exe`
+3. Make the binary executable (Linux/macOS):
+   ```bash
+   chmod +x gitrewrite-*
+   ```
+4. Move the binary to a location in your PATH:
+   ```bash
+   # Linux/macOS
+   mv gitrewrite-* /usr/local/bin/gitrewrite
+   
+   # Or add to a personal bin directory
+   mkdir -p ~/bin
+   mv gitrewrite-* ~/bin/gitrewrite
+   ```
 
 ### Using Go
 
@@ -283,6 +309,14 @@ By enforcing [Conventional Commits](https://www.conventionalcommits.org/) standa
 - Rewriting history changes commit hashes, which can cause issues for collaborators
 - For shared repositories, communicate with your team before using this tool
 - After force pushing rewritten history, all collaborators must reset their local repositories
+- **IMPORTANT**: Force pushing will automatically close all open Pull Requests in GitHub, GitLab, or other platforms
+- **BEST PRACTICE**: Before running GitRewrite on a shared repository:
+  1. Merge or close all open Pull Requests
+  2. Coordinate with your team to ensure no active development branches exist
+  3. Have all team members push their changes
+  4. Pull down a fresh copy of the repository
+  5. Run GitRewrite
+  6. Force push the new repository
 - Collaborators should follow this procedure after you've force pushed:
   ```bash
   git fetch origin
