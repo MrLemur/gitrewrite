@@ -279,24 +279,77 @@ func GetCommandOutput(command string, args []string, dir string) (string, error)
 	return out.String(), err
 }
 
-// CreateNewRepository creates a new empty git repository at the specified path
-func CreateNewRepository(path string) error {
-	// Check if the directory already exists
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("directory %s already exists", path)
+// GetCurrentBranchName gets the name of the current branch
+func GetCurrentBranchName(repoPath string) (string, error) {
+	ui.LogShellCommand("git", []string{"branch", "--show-current"}, repoPath)
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "main", fmt.Errorf("failed to get current branch name: %v", err)
+	}
+	branchName := strings.TrimSpace(string(output))
+	if branchName == "" {
+		// If we can't get the branch name or it's empty, default to "main"
+		return "main", nil
+	}
+	return branchName, nil
+}
+
+// GetRemoteOriginURL gets the URL of the remote origin
+func GetRemoteOriginURL(repoPath string) (string, error) {
+	ui.LogShellCommand("git", []string{"remote", "get-url", "origin"}, repoPath)
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get remote origin URL: %v", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// ConfigureNewRepository sets up the new repository with the same branch name and remote as the source
+func ConfigureNewRepository(sourceRepoPath, newRepoPath string) error {
+	// Get the current branch name from the source repository
+	branchName, err := GetCurrentBranchName(sourceRepoPath)
+	if err != nil {
+		ui.LogError("Failed to get current branch name: %v", err)
+		ui.LogInfo("Will use 'main' as the default branch name")
+		branchName = "main"
 	}
 
-	// Create the directory
-	if err := os.MkdirAll(path, 0755); err != nil {
-		return fmt.Errorf("failed to create directory %s: %v", path, err)
-	}
-
-	// Initialize the repository
-	ui.LogShellCommand("git", []string{"init"}, path)
-	cmd := exec.Command("git", "init")
-	cmd.Dir = path
+	// If we're not on the default branch (usually main or master), create it
+	ui.LogInfo("Creating branch '%s' in the new repository", branchName)
+	ui.LogShellCommand("git", []string{"checkout", "-b", branchName}, newRepoPath)
+	cmd := exec.Command("git", "checkout", "-b", branchName)
+	cmd.Dir = newRepoPath
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to initialize git repository: %v, output: %s", err, output)
+		ui.LogError("Failed to create branch: %v, output: %s", err, output)
+		ui.LogInfo("Continuing with default branch name")
+	} else {
+		ui.LogSuccess("Successfully created branch '%s' in the new repository", branchName)
+	}
+
+	// Try to get the remote origin URL from the source repository
+	remoteURL, err := GetRemoteOriginURL(sourceRepoPath)
+	if err != nil {
+		ui.LogError("Failed to get remote origin URL: %v", err)
+		ui.LogInfo("No remote origin will be added to the new repository")
+		return nil // This is not a critical error, so we return nil
+	}
+
+	// Add the remote origin to the new repository
+	if remoteURL != "" {
+		ui.LogInfo("Adding remote origin '%s' to the new repository", remoteURL)
+		ui.LogShellCommand("git", []string{"remote", "add", "origin", remoteURL}, newRepoPath)
+		cmd := exec.Command("git", "remote", "add", "origin", remoteURL)
+		cmd.Dir = newRepoPath
+		if output, err := cmd.CombinedOutput(); err != nil {
+			ui.LogError("Failed to add remote origin: %v, output: %s", err, output)
+			ui.LogInfo("Continuing without remote origin")
+			return nil // This is not a critical error, so we return nil
+		}
+		ui.LogSuccess("Successfully added remote origin to the new repository")
 	}
 
 	return nil
@@ -543,6 +596,129 @@ func ApplyCommitToNewRepo(originalRepo *git.Repository, newRepoPath, commitID, n
 			return nil
 		}
 		return fmt.Errorf("failed to commit to new repo: %v, output: %s", err, output)
+	}
+
+	return nil
+}
+
+// GetDefaultBranchName gets the default branch name of the repository
+func GetDefaultBranchName(repoPath string) (string, error) {
+	// First try to get the remote's default branch (usually main or master)
+	ui.LogShellCommand("git", []string{"symbolic-ref", "refs/remotes/origin/HEAD", "--short"}, repoPath)
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+
+	if err == nil {
+		// Extract branch name from "origin/main" format
+		branchWithPrefix := strings.TrimSpace(string(output))
+		parts := strings.Split(branchWithPrefix, "/")
+		if len(parts) > 1 {
+			return parts[len(parts)-1], nil
+		}
+		return branchWithPrefix, nil
+	}
+
+	// If that fails, try to get the default branch from git config
+	ui.LogShellCommand("git", []string{"config", "--get", "init.defaultBranch"}, repoPath)
+	cmd = exec.Command("git", "config", "--get", "init.defaultBranch")
+	cmd.Dir = repoPath
+	output, err = cmd.Output()
+
+	if err == nil && len(output) > 0 {
+		return strings.TrimSpace(string(output)), nil
+	}
+
+	// If we still don't have a default branch, fall back to checking if we have main or master
+	for _, branch := range []string{"main", "master"} {
+		ui.LogShellCommand("git", []string{"show-ref", "--verify", "--quiet", "refs/heads/" + branch}, repoPath)
+		cmd = exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+		cmd.Dir = repoPath
+		if cmd.Run() == nil {
+			return branch, nil
+		}
+	}
+
+	// If all else fails, return an error
+	return "", fmt.Errorf("could not determine default branch name")
+}
+
+// CreateNewRepository creates a new empty git repository at the specified path with the given default branch name
+// The new repository is created as a sibling directory to the source repository
+func CreateNewRepository(sourceRepoPath string, targetRepoName string, defaultBranch string) error {
+	// Ensure we have an absolute path for the source repository
+	absSourcePath, err := filepath.Abs(sourceRepoPath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for source repository: %v", err)
+	}
+
+	// Clean the path to remove any trailing slashes
+	absSourcePath = filepath.Clean(absSourcePath)
+
+	// Get the parent directory of the source repository
+	parentDir := filepath.Dir(absSourcePath)
+
+	// Create the full path for the new repository
+	newRepoPath := filepath.Join(parentDir, targetRepoName)
+
+	ui.LogInfo("Creating new repository at %s (sibling to %s)", newRepoPath, absSourcePath)
+
+	// Check if the directory already exists
+	if _, err := os.Stat(newRepoPath); err == nil {
+		return fmt.Errorf("directory %s already exists", newRepoPath)
+	}
+
+	// Create the directory
+	if err := os.MkdirAll(newRepoPath, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %v", newRepoPath, err)
+	}
+
+	// Initialize the repository
+	ui.LogShellCommand("git", []string{"init", "--initial-branch=" + defaultBranch}, newRepoPath)
+	cmd := exec.Command("git", "init", "--initial-branch="+defaultBranch)
+	cmd.Dir = newRepoPath
+	if _, err := cmd.CombinedOutput(); err != nil {
+		// If the --initial-branch flag fails (older git versions), fall back to regular init
+		// and then rename the branch
+		ui.LogWarning("Failed to initialize with specific branch name, trying alternative method: %v", err)
+		ui.LogShellCommand("git", []string{"init"}, newRepoPath)
+		initCmd := exec.Command("git", "init")
+		initCmd.Dir = newRepoPath
+		if output, err := initCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to initialize git repository: %v, output: %s", err, output)
+		}
+
+		// Determine which branch was created (likely master in older git versions)
+		defaultInitBranch := "master"
+		ui.LogShellCommand("git", []string{"branch"}, newRepoPath)
+		branchCmd := exec.Command("git", "branch")
+		branchCmd.Dir = newRepoPath
+		if branchOutput, err := branchCmd.Output(); err == nil {
+			// Parse branch output to find current branch
+			branches := strings.Split(strings.TrimSpace(string(branchOutput)), "\n")
+			for _, branch := range branches {
+				if strings.HasPrefix(branch, "*") {
+					defaultInitBranch = strings.TrimSpace(strings.TrimPrefix(branch, "*"))
+					break
+				}
+			}
+		}
+
+		// Only rename if the branch names differ
+		if defaultInitBranch != defaultBranch {
+			ui.LogShellCommand("git", []string{"branch", "-m", defaultInitBranch, defaultBranch}, newRepoPath)
+			renameCmd := exec.Command("git", "branch", "-m", defaultInitBranch, defaultBranch)
+			renameCmd.Dir = newRepoPath
+			if renameOutput, renameErr := renameCmd.CombinedOutput(); renameErr != nil {
+				ui.LogWarning("Failed to rename branch from %s to %s: %v, output: %s",
+					defaultInitBranch, defaultBranch, renameErr, renameOutput)
+				// This is not a critical error, so we continue
+			} else {
+				ui.LogInfo("Successfully renamed default branch from %s to %s", defaultInitBranch, defaultBranch)
+			}
+		}
+	} else {
+		ui.LogInfo("Successfully initialized repository with branch name: %s", defaultBranch)
 	}
 
 	return nil

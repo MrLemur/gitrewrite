@@ -55,6 +55,34 @@ func RunApplication() {
 		log.Fatalf("Failed to connect to Ollama: %v", err)
 	}
 
+	// Verify the repository is on the main branch before proceeding
+	ui.UpdateStatus("Checking repository branch...")
+	ui.LogInfo("Verifying repository is on the main branch...")
+	currentBranch, err := services.GetCurrentBranchName(RepoPath)
+	if err != nil {
+		ui.LogError("Failed to determine current branch: %v", err)
+		ui.UpdateStatus("Error: Failed to determine current branch")
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Failed to determine current branch: %v", err)
+	}
+	
+	// Get the default branch name from the repository
+	defaultBranch, err := services.GetDefaultBranchName(RepoPath)
+	if err != nil {
+		ui.LogWarning("Failed to determine default branch, will use '%s' as reference: %v", currentBranch, err)
+		defaultBranch = currentBranch // Fall back to current branch
+	}
+	
+	if currentBranch != defaultBranch {
+		ui.LogError("Repository must be on the default branch (%s) to proceed. Currently on: %s", defaultBranch, currentBranch)
+		ui.UpdateStatus(fmt.Sprintf("Error: Repository must be on %s branch", defaultBranch))
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Repository must be on the default branch (%s) to proceed. Please checkout the default branch first.", defaultBranch)
+	}
+	ui.LogInfo("Verified repository is on the default branch: %s", defaultBranch)
+
 	ui.UpdateStatus("Getting model information...")
 	ui.LogInfo("Getting context size for model: %s", Model)
 	contextSize, err := services.GetModelContextSize(Model)
@@ -68,30 +96,52 @@ func RunApplication() {
 	modelContextSize = contextSize // Use our local variable
 	ui.LogInfo("Using context size of %d tokens for model %s", modelContextSize, Model)
 
-	// Determine the output repository name and path
-	var newRepoPath string
+	// Determine the output repository name
+	var newRepoName string
 	if OutputRepoName != "" {
 		// Use the specified output repository name
-		parentDir := filepath.Dir(RepoPath)
-		newRepoPath = filepath.Join(parentDir, OutputRepoName)
+		newRepoName = OutputRepoName
 	} else {
 		// Use the default name based on the original repository name
 		repoName := services.GetRepoName(RepoPath)
-		parentDir := filepath.Dir(RepoPath)
-		newRepoPath = filepath.Join(parentDir, repoName+"-rewritten")
+		newRepoName = repoName + "-rewritten"
 	}
+
+	// We need the new repo path for later operations
+	var newRepoPath string
 
 	if DryRun {
 		ui.LogInfo("Running in dry run mode - changes will not be applied")
 	} else {
 		ui.UpdateStatus("Creating new repository...")
-		ui.LogInfo("Creating new repository at %s", newRepoPath)
-		if err := services.CreateNewRepository(newRepoPath); err != nil {
+		ui.LogInfo("Creating new repository with name %s", newRepoName)
+		if err := services.CreateNewRepository(RepoPath, newRepoName, defaultBranch); err != nil {
 			ui.LogError("Failed to create new repository: %v", err)
 			ui.UpdateStatus("Error: Failed to create new repository")
 			time.Sleep(2 * time.Second)
 			ui.App.Stop()
-			log.Fatalf("Failed to create new repository at %s: %v", newRepoPath, err)
+			log.Fatalf("Failed to create new repository: %v", err)
+		}
+		
+		// Get the full path to the new repository
+		absSourcePath, err := filepath.Abs(RepoPath)
+		if err != nil {
+			ui.LogWarning("Failed to get absolute path for source repository: %v", err)
+			absSourcePath = filepath.Clean(RepoPath)
+		} else {
+			absSourcePath = filepath.Clean(absSourcePath)
+		}
+		sourceParentDir := filepath.Dir(absSourcePath)
+		newRepoPath = filepath.Join(sourceParentDir, newRepoName)
+		ui.LogInfo("New repository located at %s", newRepoPath)
+		
+		// Configure the new repository with same branch name and remote as source
+		ui.UpdateStatus("Configuring new repository...")
+		ui.LogInfo("Configuring new repository to match source...")
+		if err := services.ConfigureNewRepository(RepoPath, newRepoPath); err != nil {
+			ui.LogError("Failed to configure new repository: %v", err)
+			ui.UpdateStatus("Warning: Could not fully configure new repository")
+			// We continue here as this is not a critical error
 		}
 	}
 
@@ -186,6 +236,19 @@ func RunApplication() {
 			ui.ProcessedCommits = len(existingOutputs)
 			ui.UpdateProgressBar()
 		}
+	}
+
+	// If not in dry run mode, calculate the new repo path for the confirmation message
+	if !DryRun && newRepoPath == "" {
+		absSourcePath, err := filepath.Abs(RepoPath)
+		if err != nil {
+			ui.LogWarning("Failed to get absolute path for source repository: %v", err)
+			absSourcePath = filepath.Clean(RepoPath)
+		} else {
+			absSourcePath = filepath.Clean(absSourcePath)
+		}
+		sourceParentDir := filepath.Dir(absSourcePath)
+		newRepoPath = filepath.Join(sourceParentDir, newRepoName)
 	}
 
 	// Add confirmation dialog if not in dry run mode
@@ -456,7 +519,7 @@ func savePartialDryRunResults(filePath string, outputs []models.RewriteOutput) {
 }
 
 // ApplyChangesMode reads a JSON file with rewrite outputs and applies each change
-func ApplyChangesMode(repoPath, changesFile string) {
+func ApplyChangesMode(repoPath, changesFile string) error {
 	ui.UpdateStatus("Applying changes from file...")
 	ui.LogInfo("Opening repository at %s", repoPath)
 	repo, err := git.PlainOpen(repoPath)
@@ -468,42 +531,89 @@ func ApplyChangesMode(repoPath, changesFile string) {
 		log.Fatalf("Failed to open repository at %s: %v", repoPath, err)
 	}
 
+	// Verify the repository is on the main branch before proceeding
+	ui.UpdateStatus("Checking repository branch...")
+	ui.LogInfo("Verifying repository is on the main branch...")
+	currentBranch, err := services.GetCurrentBranchName(repoPath)
+	if err != nil {
+		ui.LogError("Failed to determine current branch: %v", err)
+		ui.UpdateStatus("Error: Failed to determine current branch")
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Failed to determine current branch: %v", err)
+	}
+	
+	// Get the default branch name from the repository
+	defaultBranch, err := services.GetDefaultBranchName(repoPath)
+	if err != nil {
+		ui.LogWarning("Failed to determine default branch, will use '%s' as reference: %v", currentBranch, err)
+		defaultBranch = currentBranch // Fall back to current branch
+	}
+	
+	if currentBranch != defaultBranch {
+		ui.LogError("Repository must be on the default branch (%s) to proceed. Currently on: %s", defaultBranch, currentBranch)
+		ui.UpdateStatus(fmt.Sprintf("Error: Repository must be on %s branch", defaultBranch))
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Repository must be on the default branch (%s) to proceed. Please checkout the default branch first.", defaultBranch)
+	}
+	ui.LogInfo("Verified repository is on the default branch: %s", defaultBranch)
+
 	// Read and parse the JSON file
 	data, err := os.ReadFile(changesFile)
 	if err != nil {
 		ui.LogError("Failed to read changes file: %v", err)
 		ui.UpdateStatus("Error: Failed to read changes file")
-		return
+		return err
 	}
 	var changes []models.RewriteOutput
 	if err := json.Unmarshal(data, &changes); err != nil {
 		ui.LogError("Failed to parse changes file: %v", err)
 		ui.UpdateStatus("Error: Failed to parse changes file")
-		return
+		return err
 	}
 	ui.LogInfo("Loaded %d change entries from %s", len(changes), changesFile)
 
-	// Determine the output repository name and path
-	var newRepoPath string
+	// Determine the output repository name
+	var newRepoName string
 	if OutputRepoName != "" {
 		// Use the specified output repository name
-		parentDir := filepath.Dir(repoPath)
-		newRepoPath = filepath.Join(parentDir, OutputRepoName)
+		newRepoName = OutputRepoName
 	} else {
 		// Use the default name based on the original repository name
 		repoName := services.GetRepoName(repoPath)
-		parentDir := filepath.Dir(repoPath)
-		newRepoPath = filepath.Join(parentDir, repoName+"-rewritten")
+		newRepoName = repoName + "-rewritten"
 	}
 
 	ui.UpdateStatus("Creating new repository...")
-	ui.LogInfo("Creating new repository at %s", newRepoPath)
-	if err := services.CreateNewRepository(newRepoPath); err != nil {
+	ui.LogInfo("Creating new repository with name %s", newRepoName)
+	if err := services.CreateNewRepository(repoPath, newRepoName, defaultBranch); err != nil {
 		ui.LogError("Failed to create new repository: %v", err)
 		ui.UpdateStatus("Error: Failed to create new repository")
 		time.Sleep(2 * time.Second)
 		ui.App.Stop()
-		log.Fatalf("Failed to create new repository at %s: %v", newRepoPath, err)
+		log.Fatalf("Failed to create new repository: %v", err)
+	}
+	
+	// Get the full path to the new repository
+	absSourcePath, err := filepath.Abs(repoPath)
+	if err != nil {
+		ui.LogWarning("Failed to get absolute path for source repository: %v", err)
+		absSourcePath = filepath.Clean(repoPath)
+	} else {
+		absSourcePath = filepath.Clean(absSourcePath)
+	}
+	sourceParentDir := filepath.Dir(absSourcePath)
+	newRepoPath := filepath.Join(sourceParentDir, newRepoName)
+	ui.LogInfo("New repository located at %s", newRepoPath)
+	
+	// Configure the new repository with same branch name and remote as source
+	ui.UpdateStatus("Configuring new repository...")
+	ui.LogInfo("Configuring new repository to match source...")
+	if err := services.ConfigureNewRepository(repoPath, newRepoPath); err != nil {
+		ui.LogError("Failed to configure new repository: %v", err)
+		ui.UpdateStatus("Warning: Could not fully configure new repository")
+		// We continue here as this is not a critical error
 	}
 
 	// First get all commits to ensure we include those not being rewritten
@@ -581,5 +691,5 @@ func ApplyChangesMode(repoPath, changesFile string) {
 
 	ui.UpdateStatus("All changes applied. New repository created at " + newRepoPath + ". Press Ctrl+C to exit")
 	ui.LogInfo("Finished creating new repository with rewritten commits at %s", newRepoPath)
-	select {} // Keep the app running until the user exits
+	return nil
 }

@@ -314,6 +314,20 @@ func LogError(format string, args ...interface{}) {
 	}
 }
 
+// LogWarning logs a warning message
+func LogWarning(format string, args ...interface{}) {
+	timestamp := time.Now().Format("15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(LogView, "[blue]%s[white] [yellow]WARNING[white]: %s\n", timestamp, msg)
+
+	if isDebugLogging {
+		debugLogMutex.Lock()
+		defer debugLogMutex.Unlock()
+		fullTimestamp := time.Now().Format("2006-01-02 15:04:05.000")
+		fmt.Fprintf(debugLogger, "[%s] WARNING: %s\n", fullTimestamp, msg)
+	}
+}
+
 // LogSuccess logs a success message
 func LogSuccess(format string, args ...interface{}) {
 	timestamp := time.Now().Format("15:04:05")
