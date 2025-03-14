@@ -18,6 +18,7 @@ var (
 	MaxFilesPerCommit         int
 	SummarizeOversizedCommits bool
 	DebugLogFile              string
+	OutputRepoName            string
 )
 
 // ParseFlags parses command line flags
@@ -34,5 +35,6 @@ func ParseFlags() {
 	flag.IntVar(&MaxFilesPerCommit, "max-files", 200, "Maximum number of files in a commit before handling differently")
 	flag.BoolVar(&SummarizeOversizedCommits, "summarize-oversized", false, "Generate a one-line summary for commits with too many files instead of skipping them")
 	flag.StringVar(&DebugLogFile, "debug-log", "", "Path to output debug log file")
+	flag.StringVar(&OutputRepoName, "output-repo", "", "Name of the output repository (default: <original-repo-name>-rewritten)")
 	flag.Parse()
 }

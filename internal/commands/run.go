@@ -6,8 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -16,7 +16,6 @@ import (
 	"github.com/MrLemur/gitrewrite/internal/services"
 	"github.com/MrLemur/gitrewrite/internal/ui"
 	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
 )
 
 // Local reference to the model context size
@@ -69,8 +68,31 @@ func RunApplication() {
 	modelContextSize = contextSize // Use our local variable
 	ui.LogInfo("Using context size of %d tokens for model %s", modelContextSize, Model)
 
+	// Determine the output repository name and path
+	var newRepoPath string
+	if OutputRepoName != "" {
+		// Use the specified output repository name
+		parentDir := filepath.Dir(RepoPath)
+		newRepoPath = filepath.Join(parentDir, OutputRepoName)
+	} else {
+		// Use the default name based on the original repository name
+		repoName := services.GetRepoName(RepoPath)
+		parentDir := filepath.Dir(RepoPath)
+		newRepoPath = filepath.Join(parentDir, repoName+"-rewritten")
+	}
+
 	if DryRun {
 		ui.LogInfo("Running in dry run mode - changes will not be applied")
+	} else {
+		ui.UpdateStatus("Creating new repository...")
+		ui.LogInfo("Creating new repository at %s", newRepoPath)
+		if err := services.CreateNewRepository(newRepoPath); err != nil {
+			ui.LogError("Failed to create new repository: %v", err)
+			ui.UpdateStatus("Error: Failed to create new repository")
+			time.Sleep(2 * time.Second)
+			ui.App.Stop()
+			log.Fatalf("Failed to create new repository at %s: %v", newRepoPath, err)
+		}
 	}
 
 	var outputFilePath string
@@ -110,23 +132,24 @@ func RunApplication() {
 		ui.LogInfo("Using exclude pattern: %s", ExcludeFiles)
 	}
 
-	// Get commits to rewrite
-	oldCommits, err := services.GetCommitsToRewrite(repo, MaxMsgLength, MaxDiffLength)
+	// Get commits to rewrite in chronological order (oldest to newest)
+	ui.UpdateStatus("Getting commits in chronological order...")
+	allCommits, commitsToRewrite, err := services.GetCommitsChronological(repo, MaxMsgLength, MaxDiffLength)
 	if err != nil {
-		ui.LogError("Failed to iterate over commits: %v", err)
-		ui.UpdateStatus("Error: Failed to iterate over commits")
+		ui.LogError("Failed to get commits in chronological order: %v", err)
+		ui.UpdateStatus("Error: Failed to get commits")
 		time.Sleep(2 * time.Second)
 		ui.App.Stop()
-		log.Fatalf("Failed to iterate over commits in repository at %s: %v", RepoPath, err)
+		log.Fatalf("Failed to get commits from repository at %s: %v", RepoPath, err)
 	}
 
-	ui.TotalCommits = len(oldCommits)
+	ui.TotalCommits = len(allCommits)
 	ui.ProcessedCommits = 0
 	ui.StartTime = time.Now()
 	ui.TotalProcessingTime = 0
 	ui.CommitTimings = make([]time.Duration, 0, ui.TotalCommits)
 	ui.UpdateProgressBar()
-	ui.LogInfo("Found %d commits that need rewriting", ui.TotalCommits)
+	ui.LogInfo("Found %d total commits, %d need rewriting", ui.TotalCommits, len(commitsToRewrite))
 	if ui.TotalCommits == 0 {
 		ui.LogInfo("No commits to process. Exiting.")
 		ui.UpdateStatus("No commits to process. Press Ctrl+C to exit")
@@ -152,22 +175,22 @@ func RunApplication() {
 
 			// Filter out already processed commits
 			var remainingCommits []models.CommitOutput
-			for _, commit := range oldCommits {
+			for _, commit := range commitsToRewrite {
 				if !containsCommitID(processedCommitIDs, commit.CommitID) {
 					remainingCommits = append(remainingCommits, commit)
 				}
 			}
 
-			ui.LogInfo("Skipping %d already processed commits", len(oldCommits)-len(remainingCommits))
-			oldCommits = remainingCommits
+			ui.LogInfo("Skipping %d already processed commits", len(commitsToRewrite)-len(remainingCommits))
+			commitsToRewrite = remainingCommits
 			ui.ProcessedCommits = len(existingOutputs)
 			ui.UpdateProgressBar()
 		}
 	}
 
-	// Add confirmation dialog if we're not in dry run mode
+	// Add confirmation dialog if not in dry run mode
 	if !DryRun {
-		confirmMessage := fmt.Sprintf("%d commits have been found and will be processed.\n\nWARNING: This process is irreversible and will modify your git history.\n\n'No' is selected by default. Use Tab to select 'Yes' if you want to proceed.", ui.TotalCommits)
+		confirmMessage := fmt.Sprintf("%d total commits found, %d will be rewritten with improved messages. All commits will be applied to a new repository at %s.\n\nThis operation will create a new repository with the same files but improved commit messages.\n\n'No' is selected by default. Use Tab to select 'Yes' if you want to proceed.", ui.TotalCommits, len(commitsToRewrite), newRepoPath)
 		confirmed := ui.ShowConfirmationDialog(confirmMessage)
 		if !confirmed {
 			ui.LogInfo("User cancelled the operation. Exiting.")
@@ -180,7 +203,29 @@ func RunApplication() {
 
 	// Start a goroutine to process all commits
 	go func() {
-		for _, commit := range oldCommits {
+		for _, commit := range allCommits {
+			shortID := commit.CommitID[:8]
+
+			// For commits that don't need rewriting, just apply them with the original message
+			if !commit.NeedsRewrite {
+				if !DryRun {
+					ui.LogInfo("Applying commit %s with original message (no rewrite needed)...", shortID)
+					ui.UpdateStatus(fmt.Sprintf("Applying commit %s...", shortID))
+
+					if err := services.ApplyCommitToNewRepo(repo, newRepoPath, commit.CommitID, commit.Message); err != nil {
+						ui.LogError("Failed to apply commit %s to new repository: %v", shortID, err)
+						continue
+					}
+
+					ui.LogSuccess("Successfully applied commit %s with original message", shortID)
+				}
+				ui.ProcessedCommits++
+				ui.UpdateProgressBar()
+				continue
+			}
+
+			// For commits that need rewriting, process them
+
 			// Apply file exclusion pattern if needed
 			if excludePattern != nil {
 				var filteredFiles []models.File
@@ -192,12 +237,12 @@ func RunApplication() {
 
 				skipCount := len(commit.Files) - len(filteredFiles)
 				if skipCount > 0 {
-					ui.LogInfo("Excluded %d files matching pattern from commit %s", skipCount, commit.CommitID[:8])
+					ui.LogInfo("Excluded %d files matching pattern from commit %s", skipCount, shortID)
 				}
 				commit.Files = filteredFiles
 			}
+
 			if len(commit.Files) > MaxFilesPerCommit {
-				shortID := commit.CommitID[:8]
 				if SummarizeOversizedCommits {
 					ui.LogInfo("Commit %s has %d files (exceeding limit of %d). Generating simplified summary...", shortID, len(commit.Files), MaxFilesPerCommit)
 					ui.UpdateStatus(fmt.Sprintf("Processing oversized commit %s...", shortID))
@@ -227,14 +272,16 @@ func RunApplication() {
 						rewriteOutputs = append(rewriteOutputs, rewriteOutput)
 						ui.LogInfo("Added oversized commit %s to dry run output", shortID)
 					} else {
-						if err := services.RewordCommit(RepoPath, commit.CommitID, newMessage); err != nil {
-							ui.LogError("Failed to reword oversized commit %s: %v", shortID, err)
+						// Apply the commit to the new repository
+						ui.UpdateStatus(fmt.Sprintf("Applying oversized commit %s to new repository...", shortID))
+						if err := services.ApplyCommitToNewRepo(repo, newRepoPath, commit.CommitID, newMessage); err != nil {
+							ui.LogError("Failed to apply oversized commit %s to new repository: %v", shortID, err)
 							continue
 						}
 
 						ui.TotalProcessingTime += commitProcessingTime
 						ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
-						ui.LogSuccess("Successfully rewrote oversized commit %s", shortID)
+						ui.LogSuccess("Successfully applied oversized commit %s to new repository", shortID)
 					}
 					ui.ProcessedCommits++
 					ui.UpdateProgressBar()
@@ -243,12 +290,10 @@ func RunApplication() {
 					continue
 				}
 			} else {
-
 				if ui.ProcessedCommits > 0 {
 					ui.MoveToLastCommit()
 				}
 
-				shortID := commit.CommitID[:8]
 				ui.LogInfo("Processing commit %s...", shortID)
 				ui.UpdateStatus(fmt.Sprintf("Processing commit %s...", shortID))
 
@@ -277,6 +322,7 @@ func RunApplication() {
 				newMessage := strings.Join(newMessageLines, "\n\r")
 				ui.UpdateCommitDetails(commit.CommitID, len(commit.Files), totalDiffSize, strings.TrimSpace(commit.Message), newMessage)
 				ui.LogInfo("New commit message for %s generated successfully", shortID)
+
 				if DryRun {
 					rewriteOutput := models.RewriteOutput{
 						CommitID:     commit.CommitID,
@@ -293,15 +339,17 @@ func RunApplication() {
 						savePartialDryRunResults(outputFilePath, rewriteOutputs)
 					}
 				} else {
-					if err := services.RewordCommit(RepoPath, newCommit.CommitID, newMessage); err != nil {
-						ui.LogError("Failed to reword commit %s: %v", shortID, err)
+					// Apply the commit to the new repository
+					ui.UpdateStatus(fmt.Sprintf("Applying commit %s to new repository...", shortID))
+					if err := services.ApplyCommitToNewRepo(repo, newRepoPath, commit.CommitID, newMessage); err != nil {
+						ui.LogError("Failed to apply commit %s to new repository: %v", shortID, err)
 						continue
 					}
 
 					// Update timing statistics
 					ui.TotalProcessingTime += commitProcessingTime
 					ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
-					ui.LogSuccess("Successfully rewrote commit %s", shortID)
+					ui.LogSuccess("Successfully applied commit %s to new repository", shortID)
 				}
 				ui.ProcessedCommits++
 				ui.UpdateProgressBar()
@@ -325,9 +373,9 @@ func RunApplication() {
 					ui.UpdateStatus("Dry run completed. Press Ctrl+C to exit")
 				}
 			}
-		} else {
-			ui.UpdateStatus("All commits processed. Press Ctrl+C to exit")
-			ui.LogInfo("Finished rewriting all commits")
+		} else if !DryRun {
+			ui.UpdateStatus("All commits processed. New repository created at " + newRepoPath + ". Press Ctrl+C to exit")
+			ui.LogInfo("Finished creating new repository with rewritten commits at %s", newRepoPath)
 		}
 
 		// Signal that we're done processing
@@ -435,25 +483,47 @@ func ApplyChangesMode(repoPath, changesFile string) {
 	}
 	ui.LogInfo("Loaded %d change entries from %s", len(changes), changesFile)
 
-	// For safer rebase operations, process changes from oldest to newest.
-	// We sort by commit date by retrieving each commit object.
-	type commitWithTime struct {
-		output models.RewriteOutput
-		time   time.Time
+	// Determine the output repository name and path
+	var newRepoPath string
+	if OutputRepoName != "" {
+		// Use the specified output repository name
+		parentDir := filepath.Dir(repoPath)
+		newRepoPath = filepath.Join(parentDir, OutputRepoName)
+	} else {
+		// Use the default name based on the original repository name
+		repoName := services.GetRepoName(repoPath)
+		parentDir := filepath.Dir(repoPath)
+		newRepoPath = filepath.Join(parentDir, repoName+"-rewritten")
 	}
-	var commits []commitWithTime
+
+	ui.UpdateStatus("Creating new repository...")
+	ui.LogInfo("Creating new repository at %s", newRepoPath)
+	if err := services.CreateNewRepository(newRepoPath); err != nil {
+		ui.LogError("Failed to create new repository: %v", err)
+		ui.UpdateStatus("Error: Failed to create new repository")
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Failed to create new repository at %s: %v", newRepoPath, err)
+	}
+
+	// First get all commits to ensure we include those not being rewritten
+	ui.UpdateStatus("Getting all commits...")
+	allCommits, _, err := services.GetCommitsChronological(repo, MaxMsgLength, MaxDiffLength)
+	if err != nil {
+		ui.LogError("Failed to get all commits: %v", err)
+		ui.UpdateStatus("Error: Failed to get all commits")
+		time.Sleep(2 * time.Second)
+		ui.App.Stop()
+		log.Fatalf("Failed to get all commits: %v", err)
+	}
+
+	// Build a map of commit IDs to their new messages
+	rewriteMap := make(map[string]string)
 	for _, change := range changes {
-		commitObj, err := repo.CommitObject(plumbing.NewHash(change.CommitID))
-		if err != nil {
-			ui.LogError("Error retrieving commit %s: %v", change.CommitID, err)
-			continue
-		}
-		commits = append(commits, commitWithTime{output: change, time: commitObj.Committer.When})
+		rewriteMap[change.CommitID] = change.RewrittenMsg
 	}
-	sort.Slice(commits, func(i, j int) bool {
-		return commits[i].time.Before(commits[j].time)
-	})
-	ui.TotalCommits = len(commits)
+
+	ui.TotalCommits = len(allCommits)
 	ui.ProcessedCommits = 0
 	ui.StartTime = time.Now()
 	ui.TotalProcessingTime = 0
@@ -461,7 +531,7 @@ func ApplyChangesMode(repoPath, changesFile string) {
 	ui.UpdateProgressBar()
 
 	if ui.TotalCommits > 0 {
-		confirmMessage := fmt.Sprintf("%d commits from file will be processed.\n\nWARNING: This process is irreversible and will modify your git history.\n\n'No' is selected by default. Use Tab to select 'Yes' if you want to proceed.", ui.TotalCommits)
+		confirmMessage := fmt.Sprintf("%d total commits will be processed, %d with improved messages from file. All will be applied to a new repository at %s.\n\nThis operation will create a new repository with the same files but improved commit messages.\n\n'No' is selected by default. Use Tab to select 'Yes' if you want to proceed.", ui.TotalCommits, len(changes), newRepoPath)
 		confirmed := ui.ShowConfirmationDialog(confirmMessage)
 		if !confirmed {
 			ui.LogInfo("User cancelled the operation. Exiting.")
@@ -470,46 +540,46 @@ func ApplyChangesMode(repoPath, changesFile string) {
 		}
 	}
 
-	// Process each change entry
-	for _, entry := range commits {
-		change := entry.output
-		var targetID string
+	// Process all commits in chronological order
+	for _, commit := range allCommits {
+		commitID := commit.CommitID
+		shortID := commitID[:8]
 
-		commitObj, err := repo.CommitObject(plumbing.NewHash(targetID))
-		if err != nil {
-			ui.LogError("Failed to retrieve commit %s: %v", targetID, err)
-			continue
-		}
-		if strings.TrimSpace(commitObj.Message) != strings.TrimSpace(change.OriginalMsg) {
-			ui.LogError("Commit %s original message does not match expected value; skipping", targetID[:8])
-			continue
-		}
+		// Check if this commit has a rewritten message in the changes file
+		newMessage, hasRewrite := rewriteMap[commitID]
 
-		ui.LogInfo("Rewriting commit %s...", targetID[:8])
-		ui.UpdateStatus(fmt.Sprintf("Rewriting commit %s...", targetID[:8]))
-
-		// For apply-changes mode, we don't have the full diff information
-		// so we'll show N/A for the diff size
-		if change.FilesChanged > 0 {
-			ui.UpdateCommitDetails(targetID, change.FilesChanged, -1, strings.TrimSpace(change.OriginalMsg), change.RewrittenMsg)
+		if hasRewrite {
+			ui.LogInfo("Applying commit %s with rewritten message...", shortID)
+			ui.UpdateStatus(fmt.Sprintf("Applying commit %s with rewritten message...", shortID))
+			ui.UpdateCommitDetails(commitID, 0, -1, commit.Message, newMessage)
 		} else {
-			ui.UpdateCommitDetails(targetID, 0, -1, strings.TrimSpace(change.OriginalMsg), change.RewrittenMsg)
+			ui.LogInfo("Applying commit %s with original message...", shortID)
+			ui.UpdateStatus(fmt.Sprintf("Applying commit %s with original message...", shortID))
+			newMessage = commit.Message
 		}
 
 		ui.LastCommitStartTime = time.Now()
-		if err := services.RewordCommit(repoPath, targetID, change.RewrittenMsg); err != nil {
-			ui.LogError("Failed to reword commit %s: %v", targetID[:8], err)
-		} else {
-			ui.LogSuccess("Successfully rewrote commit %s", targetID[:8])
-			// Record processing time for this commit
-			commitProcessingTime := time.Since(ui.LastCommitStartTime)
-			ui.TotalProcessingTime += commitProcessingTime
-			ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
+		// Apply the commit to the new repository
+		if err := services.ApplyCommitToNewRepo(repo, newRepoPath, commitID, newMessage); err != nil {
+			ui.LogError("Failed to apply commit %s to new repository: %v", shortID, err)
+			continue
 		}
+
+		if hasRewrite {
+			ui.LogSuccess("Successfully applied commit %s with rewritten message", shortID)
+		} else {
+			ui.LogSuccess("Successfully applied commit %s with original message", shortID)
+		}
+
+		commitProcessingTime := time.Since(ui.LastCommitStartTime)
+		ui.TotalProcessingTime += commitProcessingTime
+		ui.CommitTimings = append(ui.CommitTimings, commitProcessingTime)
+
 		ui.ProcessedCommits++
 		ui.UpdateProgressBar()
 	}
-	ui.UpdateStatus("All changes applied. Press Ctrl+C to exit")
-	ui.LogInfo("Finished applying all changes")
+
+	ui.UpdateStatus("All changes applied. New repository created at " + newRepoPath + ". Press Ctrl+C to exit")
+	ui.LogInfo("Finished creating new repository with rewritten commits at %s", newRepoPath)
 	select {} // Keep the app running until the user exits
 }

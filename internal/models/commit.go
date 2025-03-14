@@ -2,9 +2,10 @@ package models
 
 // CommitOutput represents the structure of a git commit with its details
 type CommitOutput struct {
-	CommitID string `json:"commit_id"`
-	Message  string `json:"message"`
-	Files    []File `json:"files"`
+	CommitID     string `json:"commit_id"`
+	Message      string `json:"message"`
+	Files        []File `json:"files"`
+	NeedsRewrite bool   `json:"needs_rewrite"`
 }
 
 // File represents a single file change in a commit
