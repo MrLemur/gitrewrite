@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/gdamore/tcell/v2 v2.8.1
-	github.com/go-git/go-git/v5 v5.14.0
+	github.com/go-git/go-git/v5 v5.16.5
 	github.com/ollama/ollama v0.5.12
 	github.com/rivo/tview v0.0.0-20241227133733-17b7edb88c57
 )
@@ -12,7 +12,7 @@ require (
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/ProtonMail/go-crypto v1.1.5 // indirect
+	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/cloudflare/circl v1.6.1 // indirect
 	github.com/cyphar/filepath-securejoin v0.4.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
